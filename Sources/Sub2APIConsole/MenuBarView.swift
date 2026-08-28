@@ -3,7 +3,9 @@ import Sub2APIKit
 import SwiftUI
 
 struct MenuBarLabel: View {
+  @Environment(\.openSettings) private var openSettings
   @ObservedObject var store: MonitorStore
+  @State private var hasHandledInitialPresentation = false
 
   var body: some View {
     HStack(spacing: 4) {
@@ -13,11 +15,25 @@ struct MenuBarLabel: View {
           .monospacedDigit()
       }
     }
-    .onAppear { store.start() }
+    .onAppear { handleAppearance() }
     .onReceive(
       NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
     ) { _ in
       store.refreshAfterWake()
+    }
+  }
+
+  private func handleAppearance() {
+    store.start()
+    guard !hasHandledInitialPresentation else { return }
+    hasHandledInitialPresentation = true
+    guard !store.isConfigured else { return }
+
+    // A menu bar app otherwise has no visible first-launch surface.
+    Task { @MainActor in
+      await Task.yield()
+      openSettings()
+      NSApplication.shared.activate(ignoringOtherApps: true)
     }
   }
 }
