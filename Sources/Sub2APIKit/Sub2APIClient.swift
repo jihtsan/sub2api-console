@@ -158,6 +158,61 @@ public actor Sub2APIClient {
     )
   }
 
+  public func fetchAdminAPIKeyList() async throws -> AdminAPIKeyListSnapshot {
+    let users = try await fetchAllAdminUsers()
+    let usersByID = Dictionary(uniqueKeysWithValues: users.map { ($0.id, $0) })
+    var metadata: [(key: AdminAPIKeyMetadata, owner: AdminUserSummary)] = []
+    var seenKeyIDs = Set<Int64>()
+
+    for user in users {
+      try Task.checkCancellation()
+      var page = try await requestAdminAPIKeyPage(userID: user.id, page: 1, pageSize: 100)
+      let pages = page.pages
+
+      for key in page.items where seenKeyIDs.insert(key.id).inserted {
+        metadata.append((key: key, owner: usersByID[key.userID] ?? user))
+      }
+
+      if pages > 1 {
+        for pageNumber in 2...pages {
+          try Task.checkCancellation()
+          page = try await requestAdminAPIKeyPage(
+            userID: user.id,
+            page: pageNumber,
+            pageSize: 100
+          )
+          for key in page.items where seenKeyIDs.insert(key.id).inserted {
+            metadata.append((key: key, owner: usersByID[key.userID] ?? user))
+          }
+        }
+      }
+    }
+
+    guard !metadata.isEmpty else {
+      return AdminAPIKeyListSnapshot(items: [], warning: nil)
+    }
+
+    var todayRequestsByKeyID: [Int64: Int] = [:]
+    var warning: String?
+    do {
+      let usage = try await requestAdminAPIKeyUsageTrend(limit: metadata.count)
+      for point in usage.trend {
+        todayRequestsByKeyID[point.apiKeyID, default: 0] += max(point.requests ?? 0, 0)
+      }
+    } catch {
+      warning = "今日调用量暂不可用：\(error.localizedDescription)"
+    }
+
+    let items = metadata.map { entry in
+      AdminAPIKeyListItem(
+        metadata: entry.key,
+        owner: entry.owner,
+        todayRequests: warning == nil ? todayRequestsByKeyID[entry.key.id, default: 0] : nil
+      )
+    }
+    return AdminAPIKeyListSnapshot(items: items, warning: warning)
+  }
+
   public func fetchAccountSnapshot() async throws -> AccountMonitorSnapshot {
     let user: UserProfile = try await authorizedPanelRequest(path: "auth/me")
     let userStats: UserDashboardStats = try await authorizedPanelRequest(
@@ -251,6 +306,80 @@ public actor Sub2APIClient {
     } catch {
       return ([], "账号列表暂不可用：\(error.localizedDescription)")
     }
+  }
+
+  private func fetchAllAdminUsers() async throws -> [AdminUserSummary] {
+    let pageSize = 100
+    var page = try await requestAdminUserPage(page: 1, pageSize: pageSize)
+    var users = page.items
+
+    if page.pages > 1 {
+      for pageNumber in 2...page.pages {
+        try Task.checkCancellation()
+        page = try await requestAdminUserPage(page: pageNumber, pageSize: pageSize)
+        users.append(contentsOf: page.items)
+      }
+    }
+    return users
+  }
+
+  private func requestAdminUserPage(page: Int, pageSize: Int) async throws -> AdminUserPage {
+    try await requestAdminAuthorized(
+      path: "admin/users",
+      method: "GET",
+      body: nil,
+      queryItems: [
+        URLQueryItem(name: "page", value: String(page)),
+        URLQueryItem(name: "page_size", value: String(pageSize)),
+        URLQueryItem(name: "include_subscriptions", value: "false"),
+      ],
+      timeoutInterval: 30
+    )
+  }
+
+  private func requestAdminAPIKeyPage(
+    userID: Int64,
+    page: Int,
+    pageSize: Int
+  ) async throws -> AdminAPIKeyPage {
+    try await requestAdminAuthorized(
+      path: "admin/users/\(userID)/api-keys",
+      method: "GET",
+      body: nil,
+      queryItems: [
+        URLQueryItem(name: "page", value: String(page)),
+        URLQueryItem(name: "page_size", value: String(pageSize)),
+      ],
+      timeoutInterval: 30
+    )
+  }
+
+  private func requestAdminAPIKeyUsageTrend(
+    limit: Int
+  ) async throws -> AdminAPIKeyUsageTrendResponse {
+    let today = currentDateString()
+    return try await requestAdminAuthorized(
+      path: "admin/dashboard/api-keys-trend",
+      method: "GET",
+      body: nil,
+      queryItems: [
+        URLQueryItem(name: "start_date", value: today),
+        URLQueryItem(name: "end_date", value: today),
+        URLQueryItem(name: "granularity", value: "day"),
+        URLQueryItem(name: "limit", value: String(max(limit, 1))),
+        URLQueryItem(name: "timezone", value: TimeZone.current.identifier),
+      ],
+      timeoutInterval: 30
+    )
+  }
+
+  private func currentDateString() -> String {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone.current
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.string(from: Date())
   }
 
   private func fetchAdminAccountSnapshots(apiKey: String?) async throws -> [AdminAccountSnapshot] {
@@ -372,6 +501,7 @@ public actor Sub2APIClient {
     path: String,
     method: String,
     body: Data?,
+    queryItems: [URLQueryItem] = [],
     timeoutInterval: TimeInterval
   ) async throws -> Payload {
     if let apiKey = try credentialStore.loadAdminAPIKey() {
@@ -379,7 +509,7 @@ public actor Sub2APIClient {
         path: path,
         method: method,
         body: body,
-        queryItems: [],
+        queryItems: queryItems,
         apiKey: apiKey,
         timeoutInterval: timeoutInterval
       )
@@ -388,6 +518,7 @@ public actor Sub2APIClient {
       path: path,
       method: method,
       body: body,
+      queryItems: queryItems,
       timeoutInterval: timeoutInterval
     )
   }

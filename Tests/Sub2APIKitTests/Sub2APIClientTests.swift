@@ -218,6 +218,144 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
     )
   }
 
+  func testFetchesAdminAPIKeyListWithGroupAndTodayUsage() async throws {
+    let credentials = InMemoryCredentialStore(adminAPIKey: "admin-list-key")
+    let requests = RequestLog()
+
+    URLProtocolStub.handler = { request in
+      requests.append(request)
+
+      switch request.url?.path {
+      case "/proxy/api/v1/admin/users":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "items": [
+                {"id": 7, "username": "alice", "email": "alice@example.com"},
+                {"id": 8, "username": "bob", "email": "bob@example.com"}
+              ],
+              "total": 2,
+              "page": 1,
+              "page_size": 100,
+              "pages": 1
+            }
+            """
+          )
+        )
+      case "/proxy/api/v1/admin/users/7/api-keys":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "items": [
+                {
+                  "id": 101,
+                  "user_id": 7,
+                  "key": "sk-secret-value-that-must-not-be-rendered",
+                  "name": "生产服务",
+                  "group_id": 3,
+                  "status": "active",
+                  "group": {"id": 3, "name": "Claude"}
+                }
+              ],
+              "total": 1,
+              "page": 1,
+              "page_size": 100,
+              "pages": 1
+            }
+            """
+          )
+        )
+      case "/proxy/api/v1/admin/users/8/api-keys":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "items": [
+                {
+                  "id": 102,
+                  "user_id": 8,
+                  "name": "备用服务",
+                  "group_id": null,
+                  "status": "disabled"
+                }
+              ],
+              "total": 1,
+              "page": 1,
+              "page_size": 100,
+              "pages": 1
+            }
+            """
+          )
+        )
+      case "/proxy/api/v1/admin/dashboard/api-keys-trend":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "trend": [
+                {"date": "2026-08-29", "api_key_id": 101, "key_name": "生产服务", "requests": 27, "tokens": 5000},
+                {"date": "2026-08-29", "api_key_id": 101, "key_name": "生产服务", "requests": 3, "tokens": 700},
+                {"date": "2026-08-29", "api_key_id": 102, "key_name": "备用服务", "requests": 5, "tokens": 100}
+              ],
+              "start_date": "2026-08-29",
+              "end_date": "2026-08-29",
+              "granularity": "day"
+            }
+            """
+          )
+        )
+      default:
+        return Self.unexpectedResponse(for: request)
+      }
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com/proxy/api/v1/",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+    let snapshot = try await client.fetchAdminAPIKeyList()
+
+    let production = try XCTUnwrap(snapshot.items.first { $0.id == 101 })
+    let fallback = try XCTUnwrap(snapshot.items.first { $0.id == 102 })
+    XCTAssertEqual(production.displayName, "生产服务")
+    XCTAssertEqual(production.groupName, "Claude")
+    XCTAssertEqual(production.ownerDisplayName, "alice")
+    XCTAssertEqual(production.todayRequests, 30)
+    XCTAssertEqual(fallback.groupName, "未分组")
+    XCTAssertEqual(fallback.ownerDisplayName, "bob")
+    XCTAssertEqual(fallback.todayRequests, 5)
+    XCTAssertNil(snapshot.warning)
+    XCTAssertFalse(String(describing: snapshot).contains("sk-secret-value"))
+
+    XCTAssertEqual(
+      requests.queryValue(named: "include_subscriptions", path: "/proxy/api/v1/admin/users"),
+      "false"
+    )
+    XCTAssertEqual(
+      requests.queryValue(
+        named: "limit",
+        path: "/proxy/api/v1/admin/dashboard/api-keys-trend"
+      ),
+      "2"
+    )
+    XCTAssertEqual(
+      requests.request(path: "/proxy/api/v1/admin/users")?.value(forHTTPHeaderField: "x-api-key"),
+      "admin-list-key"
+    )
+    XCTAssertEqual(
+      requests.request(path: "/proxy/api/v1/admin/dashboard/api-keys-trend")?
+        .value(forHTTPHeaderField: "x-api-key"),
+      "admin-list-key"
+    )
+  }
+
   func testOpenAIQuotaActionsUseDedicatedAdminAPIKeyHeader() async throws {
     let credentials = InMemoryCredentialStore(adminAPIKey: "admin-actions-key")
     let requests = RequestLog()
