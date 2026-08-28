@@ -30,6 +30,10 @@ final class MonitorStore: ObservableObject {
   @Published private(set) var accountActionError: String?
   @Published private(set) var openAIQuotaByAccountID: [Int64: OpenAIQuotaUsage] = [:]
   @Published private(set) var openAIQuotaErrorByAccountID: [Int64: String] = [:]
+  @Published private(set) var adminAPIKeys: [AdminAPIKeyListItem] = []
+  @Published private(set) var isLoadingAdminAPIKeys = false
+  @Published private(set) var adminAPIKeysError: String?
+  @Published private(set) var adminAPIKeysWarning: String?
 
   let settings: SettingsStore
 
@@ -43,6 +47,8 @@ final class MonitorStore: ObservableObject {
   private var isMenuPresented = false
   private var consecutiveFailures = 0
   private var retryAfterSeconds: Int?
+  private var adminAPIKeyListGeneration = 0
+  private var hasLoadedAdminAPIKeys = false
 
   init(
     settings: SettingsStore,
@@ -198,6 +204,9 @@ final class MonitorStore: ObservableObject {
       case .account:
         snapshot = .account(try await client.fetchAccountSnapshot())
       }
+      if hasLoadedAdminAPIKeys {
+        await refreshAdminAPIKeys()
+      }
       state = .connected
       consecutiveFailures = 0
       retryAfterSeconds = nil
@@ -230,6 +239,7 @@ final class MonitorStore: ObservableObject {
     accountActionError = nil
     openAIQuotaByAccountID = [:]
     openAIQuotaErrorByAccountID = [:]
+    resetAdminAPIKeyList()
     resetPendingAuthentication()
     consecutiveFailures = 0
     retryAfterSeconds = nil
@@ -266,6 +276,44 @@ final class MonitorStore: ObservableObject {
   func refreshAfterWake() {
     guard client != nil else { return }
     Task { await refresh() }
+  }
+
+  func refreshAdminAPIKeysIfNeeded() async {
+    guard !hasLoadedAdminAPIKeys else { return }
+    await refreshAdminAPIKeys()
+  }
+
+  func refreshAdminAPIKeys() async {
+    guard snapshot?.supportsAdminAccountList == true else { return }
+    guard !isLoadingAdminAPIKeys else { return }
+    guard let client else {
+      adminAPIKeysError = "尚未建立服务器连接。"
+      return
+    }
+
+    let generation = adminAPIKeyListGeneration
+    isLoadingAdminAPIKeys = true
+    adminAPIKeysError = nil
+    defer {
+      if generation == adminAPIKeyListGeneration {
+        isLoadingAdminAPIKeys = false
+      }
+    }
+
+    do {
+      let result = try await client.fetchAdminAPIKeyList()
+      guard generation == adminAPIKeyListGeneration,
+        snapshot?.supportsAdminAccountList == true
+      else { return }
+      adminAPIKeys = result.items
+      adminAPIKeysWarning = result.warning
+      hasLoadedAdminAPIKeys = true
+    } catch is CancellationError {
+      return
+    } catch {
+      guard generation == adminAPIKeyListGeneration else { return }
+      adminAPIKeysError = error.localizedDescription
+    }
   }
 
   func refreshOpenAIQuota(_ accountID: Int64) async {
@@ -441,6 +489,7 @@ final class MonitorStore: ObservableObject {
     accountActionError = nil
     openAIQuotaByAccountID = [:]
     openAIQuotaErrorByAccountID = [:]
+    resetAdminAPIKeyList()
     self.client = client
     activeMode = mode
     settings.serverAddress = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -468,6 +517,15 @@ final class MonitorStore: ObservableObject {
     pendingClient = nil
     pendingTwoFactorToken = nil
     pendingTwoFactorEmail = nil
+  }
+
+  private func resetAdminAPIKeyList() {
+    adminAPIKeyListGeneration += 1
+    hasLoadedAdminAPIKeys = false
+    adminAPIKeys = []
+    isLoadingAdminAPIKeys = false
+    adminAPIKeysError = nil
+    adminAPIKeysWarning = nil
   }
 
   private func apiKeyStatusName(_ status: String?) -> String {

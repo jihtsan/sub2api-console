@@ -40,6 +40,9 @@ struct MenuBarLabel: View {
 
 struct MenuBarView: View {
   @ObservedObject var store: MonitorStore
+  @State private var adminListTab: AdminListTab = .accounts
+  @State private var apiKeySortOption: AdminAPIKeySortOption = .todayRequests
+  @State private var apiKeySortDescending = true
 
   var body: some View {
     VStack(spacing: 0) {
@@ -81,6 +84,11 @@ struct MenuBarView: View {
     .frame(width: 390)
     .onAppear { store.setMenuPresented(true) }
     .onDisappear { store.setMenuPresented(false) }
+    .onChange(of: store.snapshot?.supportsAdminAccountList) { _, supportsAdminList in
+      if supportsAdminList != true {
+        adminListTab = .accounts
+      }
+    }
   }
 
   private var header: some View {
@@ -172,7 +180,7 @@ struct MenuBarView: View {
 
       if snapshot.supportsAdminAccountList {
         Divider()
-        adminAccountList(snapshot.adminAccounts)
+        adminResourceList(snapshot)
       }
 
       HStack(spacing: 4) {
@@ -383,6 +391,210 @@ struct MenuBarView: View {
     }
   }
 
+  private func adminResourceList(_ snapshot: MonitorSnapshot) -> some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Picker("管理员列表", selection: $adminListTab) {
+        ForEach(AdminListTab.allCases) { tab in
+          Text(tab.title).tag(tab)
+        }
+      }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+      .onChange(of: adminListTab) { _, tab in
+        guard tab == .apiKeys else { return }
+        Task { await store.refreshAdminAPIKeysIfNeeded() }
+      }
+
+      switch adminListTab {
+      case .accounts:
+        adminAccountList(snapshot.adminAccounts)
+      case .apiKeys:
+        adminAPIKeyList()
+      }
+    }
+  }
+
+  private func adminAPIKeyList() -> some View {
+    let items = sortedAdminAPIKeys
+
+    return VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Label("API 列表", systemImage: "key")
+          .font(.caption.weight(.semibold))
+        Spacer()
+        if store.isLoadingAdminAPIKeys {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Text("\(items.count) 个")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .monospacedDigit()
+        Menu {
+          ForEach(AdminAPIKeySortOption.allCases) { option in
+            Button {
+              selectAPIKeySort(option)
+            } label: {
+              Label(
+                sortMenuTitle(for: option),
+                systemImage: apiKeySortOption == option ? "checkmark" : option.systemImage
+              )
+            }
+          }
+          Divider()
+          Button {
+            apiKeySortDescending.toggle()
+          } label: {
+            Label(
+              apiKeySortDescending ? "切换为升序" : "切换为降序",
+              systemImage: apiKeySortDescending ? "arrow.up" : "arrow.down"
+            )
+          }
+        } label: {
+          Image(systemName: "arrow.up.arrow.down")
+        }
+        .menuStyle(.borderlessButton)
+        .help("排序")
+      }
+
+      if let error = store.adminAPIKeysError, items.isEmpty {
+        Label("API 列表加载失败：\(error)", systemImage: "exclamationmark.triangle")
+          .font(.caption2)
+          .foregroundStyle(.red)
+          .fixedSize(horizontal: false, vertical: true)
+      } else if store.isLoadingAdminAPIKeys, items.isEmpty {
+        HStack(spacing: 7) {
+          ProgressView()
+            .controlSize(.small)
+          Text("正在加载 API 列表…")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 10)
+      } else if items.isEmpty {
+        Text("暂无 API Key")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.vertical, 10)
+      } else {
+        ScrollView {
+          VStack(spacing: 0) {
+            ForEach(items) { apiKey in
+              AdminAPIKeyRow(apiKey: apiKey)
+              if apiKey.id != items.last?.id {
+                Divider()
+              }
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: apiKeyListViewportHeight(for: items.count))
+      }
+
+      if let warning = store.adminAPIKeysWarning {
+        Label(warning, systemImage: "info.circle")
+          .font(.caption2)
+          .foregroundStyle(.orange)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
+  }
+
+  private var sortedAdminAPIKeys: [AdminAPIKeyListItem] {
+    store.adminAPIKeys.sorted { lhs, rhs in
+      switch apiKeySortOption {
+      case .todayRequests:
+        if let order = requestCountComesBefore(
+          lhs,
+          rhs,
+          descending: apiKeySortDescending
+        ) {
+          return order
+        }
+      case .name:
+        if let order = textComesBefore(
+          lhs.displayName,
+          rhs.displayName,
+          descending: apiKeySortDescending
+        ) {
+          return order
+        }
+      case .group:
+        if let order = textComesBefore(
+          lhs.groupName,
+          rhs.groupName,
+          descending: apiKeySortDescending
+        ) {
+          return order
+        }
+      }
+      return apiKeyTieBreakComesBefore(lhs, rhs)
+    }
+  }
+
+  private func requestCountComesBefore(
+    _ lhs: AdminAPIKeyListItem,
+    _ rhs: AdminAPIKeyListItem,
+    descending: Bool
+  ) -> Bool? {
+    switch (lhs.todayRequests, rhs.todayRequests) {
+    case (nil, nil):
+      return nil
+    case let (left?, right?):
+      guard left != right else { return nil }
+      return descending ? left > right : left < right
+    case (nil, _):
+      return false
+    case (_, nil):
+      return true
+    }
+  }
+
+  private func textComesBefore(_ lhs: String, _ rhs: String, descending: Bool) -> Bool? {
+    switch lhs.localizedStandardCompare(rhs) {
+    case .orderedAscending:
+      return !descending
+    case .orderedDescending:
+      return descending
+    case .orderedSame:
+      return nil
+    }
+  }
+
+  private func apiKeyTieBreakComesBefore(
+    _ lhs: AdminAPIKeyListItem,
+    _ rhs: AdminAPIKeyListItem
+  ) -> Bool {
+    for (left, right) in [
+      (lhs.displayName, rhs.displayName),
+      (lhs.groupName, rhs.groupName),
+      (lhs.ownerDisplayName, rhs.ownerDisplayName),
+    ] {
+      if let order = textComesBefore(left, right, descending: false) {
+        return order
+      }
+    }
+    return lhs.id < rhs.id
+  }
+
+  private func selectAPIKeySort(_ option: AdminAPIKeySortOption) {
+    guard apiKeySortOption != option else { return }
+    apiKeySortOption = option
+    apiKeySortDescending = option == .todayRequests
+  }
+
+  private func sortMenuTitle(for option: AdminAPIKeySortOption) -> String {
+    guard apiKeySortOption == option else { return option.title }
+    return "\(option.title) · \(apiKeySortDescending ? "降序" : "升序")"
+  }
+
+  private func apiKeyListViewportHeight(for count: Int) -> CGFloat {
+    let estimatedContentHeight = CGFloat(max(count, 1)) * 62
+    return min(max(estimatedContentHeight, 70), 300)
+  }
+
   private func accountListViewportHeight(for count: Int) -> CGFloat {
     let estimatedContentHeight = CGFloat(max(count, 1)) * 170
     return min(max(estimatedContentHeight, 170), 360)
@@ -461,6 +673,50 @@ struct MenuBarView: View {
     case .connecting: .orange
     case .connected: store.isHealthy ? .green : .orange
     case .failed: .red
+    }
+  }
+}
+
+private struct AdminAPIKeyRow: View {
+  let apiKey: AdminAPIKeyListItem
+
+  var body: some View {
+    HStack(alignment: .center, spacing: 8) {
+      Circle()
+        .fill(statusColor)
+        .frame(width: 8, height: 8)
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text(apiKey.displayName)
+          .font(.caption.weight(.semibold))
+          .lineLimit(1)
+        Text("\(apiKey.groupName) · \(apiKey.ownerDisplayName)")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+
+      Spacer(minLength: 8)
+
+      VStack(alignment: .trailing, spacing: 2) {
+        Text(DisplayFormat.count(apiKey.todayRequests))
+          .font(.caption.weight(.semibold))
+          .monospacedDigit()
+        Text("今日调用")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .padding(.vertical, 8)
+    .help("仅显示 API 元数据，不显示密钥内容")
+  }
+
+  private var statusColor: Color {
+    switch apiKey.status?.lowercased() {
+    case "active": .green
+    case "quota_exhausted": .orange
+    case "expired", "disabled": .secondary
+    default: .secondary
     }
   }
 }
@@ -722,6 +978,44 @@ private struct AdminAccountRow: View {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .short
     return formatter.localizedString(for: date, relativeTo: Date())
+  }
+}
+
+private enum AdminListTab: String, CaseIterable, Identifiable {
+  case accounts
+  case apiKeys
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .accounts: "账号列表"
+    case .apiKeys: "API 列表"
+    }
+  }
+}
+
+private enum AdminAPIKeySortOption: String, CaseIterable, Identifiable {
+  case todayRequests
+  case name
+  case group
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .todayRequests: "今日调用量"
+    case .name: "API 名称"
+    case .group: "所属分组"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .todayRequests: "chart.bar"
+    case .name: "textformat"
+    case .group: "folder"
+    }
   }
 }
 

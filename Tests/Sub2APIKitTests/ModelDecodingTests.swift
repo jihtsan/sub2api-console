@@ -116,6 +116,51 @@ final class ModelDecodingTests: XCTestCase {
     XCTAssertEqual(snapshot.sevenDayResetAt, "2026-08-29T10:00:00Z")
   }
 
+  func testDecodesAdminAPIKeyMetadataWithoutRetainingSecret() throws {
+    let json = Data(
+      """
+      {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "items": [
+            {
+              "id": 101,
+              "user_id": 7,
+              "key": "sk-secret-value-that-must-not-be-rendered",
+              "name": "生产服务",
+              "group_id": 3,
+              "status": "active",
+              "group": {"id": 3, "name": "Claude"}
+            }
+          ],
+          "total": 1,
+          "page": 1,
+          "page_size": 100,
+          "pages": 1
+        }
+      }
+      """.utf8
+    )
+
+    let envelope = try JSONDecoder().decode(
+      APIEnvelope<AdminAPIKeyPage>.self,
+      from: json
+    )
+    let metadata = try XCTUnwrap(envelope.data?.items.first)
+    let item = AdminAPIKeyListItem(
+      metadata: metadata,
+      owner: AdminUserSummary(id: 7, username: "alice", email: "alice@example.com"),
+      todayRequests: 27
+    )
+
+    XCTAssertEqual(item.displayName, "生产服务")
+    XCTAssertEqual(item.groupName, "Claude")
+    XCTAssertEqual(item.ownerDisplayName, "alice")
+    XCTAssertEqual(item.todayRequests, 27)
+    XCTAssertFalse(String(describing: metadata).contains("sk-secret-value"))
+  }
+
   func testIgnoresExpiredRateLimitFieldsForActiveAccount() throws {
     let json = Data(
       """

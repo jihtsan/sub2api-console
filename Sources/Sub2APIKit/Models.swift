@@ -309,6 +309,148 @@ public struct AdminAccountPage: Decodable, Sendable, Equatable {
   }
 }
 
+public struct AdminUserSummary: Decodable, Sendable, Equatable, Identifiable {
+  public let id: Int64
+  public let username: String?
+  public let email: String?
+
+  public var displayName: String {
+    if let username = username?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !username.isEmpty
+    {
+      return username
+    }
+    if let email = email?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
+      return email
+    }
+    return "用户 \(id)"
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case id, username, email
+  }
+}
+
+public struct AdminUserPage: Decodable, Sendable, Equatable {
+  public let items: [AdminUserSummary]
+  public let total: Int
+  public let page: Int
+  public let pageSize: Int
+  public let pages: Int
+
+  enum CodingKeys: String, CodingKey {
+    case items, total, page, pages
+    case pageSize = "page_size"
+  }
+}
+
+public struct AdminAPIKeyGroup: Decodable, Sendable, Equatable {
+  public let id: Int64
+  public let name: String
+}
+
+/// Metadata for an administrator's API key. The secret `key` field is
+/// deliberately not modeled so it cannot be rendered by the console.
+public struct AdminAPIKeyMetadata: Decodable, Sendable, Equatable, Identifiable {
+  public let id: Int64
+  public let userID: Int64
+  public let name: String
+  public let groupID: Int64?
+  public let status: String?
+  public let group: AdminAPIKeyGroup?
+
+  enum CodingKeys: String, CodingKey {
+    case id, name, status, group
+    case userID = "user_id"
+    case groupID = "group_id"
+  }
+}
+
+public struct AdminAPIKeyPage: Decodable, Sendable, Equatable {
+  public let items: [AdminAPIKeyMetadata]
+  public let total: Int
+  public let page: Int
+  public let pageSize: Int
+  public let pages: Int
+
+  enum CodingKeys: String, CodingKey {
+    case items, total, page, pages
+    case pageSize = "page_size"
+  }
+}
+
+public struct AdminAPIKeyUsageTrendPoint: Decodable, Sendable, Equatable {
+  public let date: String
+  public let apiKeyID: Int64
+  public let keyName: String?
+  public let requests: Int?
+  public let tokens: Int?
+
+  enum CodingKeys: String, CodingKey {
+    case date, keyName = "key_name", requests, tokens
+    case apiKeyID = "api_key_id"
+  }
+}
+
+public struct AdminAPIKeyUsageTrendResponse: Decodable, Sendable, Equatable {
+  public let trend: [AdminAPIKeyUsageTrendPoint]
+}
+
+public struct AdminAPIKeyListItem: Sendable, Equatable, Identifiable {
+  public let id: Int64
+  public let name: String
+  public let groupName: String
+  public let ownerDisplayName: String
+  public let status: String?
+  public let todayRequests: Int?
+
+  public var displayName: String {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? "未命名 API" : trimmed
+  }
+
+  public init(
+    metadata: AdminAPIKeyMetadata,
+    owner: AdminUserSummary,
+    todayRequests: Int?
+  ) {
+    self.id = metadata.id
+    self.name = metadata.name
+    self.groupName = Self.groupName(for: metadata)
+    self.ownerDisplayName = owner.displayName
+    self.status = metadata.status
+    self.todayRequests = todayRequests
+  }
+
+  private static func groupName(for metadata: AdminAPIKeyMetadata) -> String {
+    if let name = metadata.group?.name.trimmingCharacters(in: .whitespacesAndNewlines),
+      !name.isEmpty
+    {
+      return name
+    }
+    if let groupID = metadata.groupID {
+      return "分组 \(groupID)"
+    }
+    return "未分组"
+  }
+}
+
+public struct AdminAPIKeyListSnapshot: Sendable, Equatable {
+  public let items: [AdminAPIKeyListItem]
+  public let warning: String?
+  public let fetchedAt: Date
+
+  public init(
+    items: [AdminAPIKeyListItem],
+    warning: String?,
+    fetchedAt: Date = Date()
+  ) {
+    self.items = items
+    self.warning = warning
+    self.fetchedAt = fetchedAt
+  }
+}
+
 public struct AdminAccountUsageBatchResponse: Decodable, Sendable, Equatable {
   public let usage: [String: AdminAccountUsageInfo]
   public let errors: [String: String]
