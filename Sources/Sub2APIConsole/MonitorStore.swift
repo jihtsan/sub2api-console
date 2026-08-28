@@ -50,6 +50,8 @@ final class MonitorStore: ObservableObject {
       switch settings.authenticationMode {
       case .apiKey:
         hasCredentials = try credentialStore.loadAPIKey() != nil
+      case .adminAPIKey:
+        hasCredentials = try credentialStore.loadAdminAPIKey() != nil
       case .account:
         hasCredentials = try credentialStore.loadSession() != nil
       }
@@ -138,6 +140,28 @@ final class MonitorStore: ObservableObject {
     }
   }
 
+  func connectWithAdminAPIKey(serverAddress: String, apiKey: String) async {
+    state = .connecting
+    resetPendingAuthentication()
+
+    do {
+      let candidate = try makeClient(serverAddress: serverAddress)
+      let adminSnapshot = try await candidate.connectAdminAPIKey(apiKey)
+      finishConnection(
+        client: candidate,
+        serverAddress: serverAddress,
+        email: "",
+        mode: .adminAPIKey
+      )
+      snapshot = .adminAPIKey(adminSnapshot)
+      state = .connected
+      consecutiveFailures = 0
+      retryAfterSeconds = nil
+    } catch {
+      recordFailure(error)
+    }
+  }
+
   func refresh() async {
     guard let client, let activeMode else {
       if state != .unconfigured {
@@ -154,6 +178,8 @@ final class MonitorStore: ObservableObject {
       switch activeMode {
       case .apiKey:
         snapshot = .apiKey(try await client.fetchAPIKeySnapshot())
+      case .adminAPIKey:
+        snapshot = .adminAPIKey(try await client.fetchAdminAPIKeySnapshot())
       case .account:
         snapshot = .account(try await client.fetchAccountSnapshot())
       }
@@ -222,6 +248,12 @@ final class MonitorStore: ObservableObject {
     Task { await refresh() }
   }
 
+  func cancelPendingLogin() {
+    guard pendingClient != nil else { return }
+    resetPendingAuthentication()
+    state = client == nil ? .unconfigured : .connected
+  }
+
   var serverWebURL: URL? {
     client?.webBaseURL
   }
@@ -241,9 +273,15 @@ final class MonitorStore: ObservableObject {
     case .failed:
       return "连接异常"
     case .connected:
-      guard case .apiKey(let apiKeySnapshot) = snapshot else { return "在线" }
-      let usage = apiKeySnapshot.usage
-      guard usage.isOperational else { return apiKeyStatusName(usage.status) }
+      if case .apiKey(let apiKeySnapshot) = snapshot {
+        let usage = apiKeySnapshot.usage
+        guard usage.isOperational else { return apiKeyStatusName(usage.status) }
+      }
+      if let unhealthyAccounts = snapshot?.adminStats?.unhealthyAccounts,
+        unhealthyAccounts > 0
+      {
+        return "\(unhealthyAccounts) 个账户异常"
+      }
       return "在线"
     }
   }
@@ -262,6 +300,11 @@ final class MonitorStore: ObservableObject {
       {
         return "exclamationmark.circle.fill"
       }
+      if let unhealthyAccounts = snapshot?.adminStats?.unhealthyAccounts,
+        unhealthyAccounts > 0
+      {
+        return "exclamationmark.circle.fill"
+      }
       return "checkmark.circle.fill"
     }
   }
@@ -273,6 +316,8 @@ final class MonitorStore: ObservableObject {
       switch snapshot {
       case .apiKey(let value):
         return DisplayFormat.currencyOrUnlimited(value.usage.effectiveRemaining)
+      case .adminAPIKey(let value):
+        return adminAccountAvailability(value.stats)
       case .account(let value):
         return DisplayFormat.currency(value.user.balance)
       }
@@ -294,12 +339,16 @@ final class MonitorStore: ObservableObject {
     if case .apiKey(let value) = snapshot {
       return value.usage.isOperational
     }
+    if let adminStats = snapshot?.adminStats {
+      return adminStats.unhealthyAccounts == 0
+    }
     return true
   }
 
   private var todayCost: Double? {
     switch snapshot {
     case .apiKey(let value): value.usage.usage?.today?.actualCost
+    case .adminAPIKey(let value): value.stats.todayActualCost
     case .account(let value): value.userStats.todayActualCost
     case nil: nil
     }
@@ -308,6 +357,7 @@ final class MonitorStore: ObservableObject {
   private var todayRequests: Int? {
     switch snapshot {
     case .apiKey(let value): value.usage.usage?.today?.requests
+    case .adminAPIKey(let value): value.stats.todayRequests
     case .account(let value): value.userStats.todayRequests
     case nil: nil
     }
@@ -316,6 +366,7 @@ final class MonitorStore: ObservableObject {
   private var rpm: Double? {
     switch snapshot {
     case .apiKey(let value): value.usage.usage?.rpm
+    case .adminAPIKey(let value): value.stats.rpm
     case .account(let value): value.adminStats?.rpm ?? value.userStats.rpm
     case nil: nil
     }
@@ -343,6 +394,9 @@ final class MonitorStore: ObservableObject {
     email: String,
     mode: AuthenticationMode
   ) {
+    if activeMode != mode {
+      snapshot = nil
+    }
     self.client = client
     activeMode = mode
     settings.serverAddress = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -379,5 +433,11 @@ final class MonitorStore: ObservableObject {
     case "disabled": "已停用"
     default: "不可用"
     }
+  }
+
+  private func adminAccountAvailability(_ stats: AdminDashboardStats) -> String? {
+    guard let total = stats.totalAccounts else { return nil }
+    let normal = stats.normalAccounts ?? max(total - stats.unhealthyAccounts, 0)
+    return "\(normal)/\(total) 可用"
   }
 }

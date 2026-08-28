@@ -117,9 +117,9 @@ struct MenuBarView: View {
       Grid(horizontalSpacing: 14, verticalSpacing: 14) {
         GridRow {
           MetricCell(
-            title: snapshot.isAPIKey ? "可用额度" : "余额",
-            value: DisplayFormat.currency(snapshot.remaining),
-            systemImage: "creditcard"
+            title: primaryMetricTitle(snapshot),
+            value: primaryMetricValue(snapshot),
+            systemImage: snapshot.isAdminAPIKey ? "person.2" : "creditcard"
           )
           MetricCell(
             title: "今日消费",
@@ -152,6 +152,13 @@ struct MenuBarView: View {
         }
       }
 
+      if case .apiKey(let apiKeySnapshot) = snapshot,
+        !usageLimitRows(apiKeySnapshot.usage).isEmpty
+      {
+        Divider()
+        usageLimits(apiKeySnapshot.usage)
+      }
+
       if let admin = snapshot.adminStats {
         Divider()
         adminSummary(admin)
@@ -161,16 +168,146 @@ struct MenuBarView: View {
         Text("更新于")
         Text(snapshot.fetchedAt, style: .relative)
         Spacer()
-        if snapshot.isAdmin {
+        if snapshot.isAdminAPIKey {
+          Text("管理员 Key")
+            .foregroundStyle(.secondary)
+        } else if snapshot.isAdmin {
           Text("管理员")
             .foregroundStyle(.secondary)
         } else if snapshot.isAPIKey {
           Text("API Key")
             .foregroundStyle(.secondary)
         }
+        if let version = snapshot.serverVersion {
+          Text(version)
+            .foregroundStyle(.secondary)
+        }
       }
       .font(.caption2)
       .foregroundStyle(.tertiary)
+    }
+  }
+
+  private func primaryMetricTitle(_ snapshot: MonitorSnapshot) -> String {
+    if snapshot.isAdminAPIKey { return "活跃用户" }
+    return snapshot.isAPIKey ? "可用额度" : "余额"
+  }
+
+  private func primaryMetricValue(_ snapshot: MonitorSnapshot) -> String {
+    if snapshot.isAdminAPIKey {
+      return DisplayFormat.count(snapshot.adminStats?.activeUsers)
+    }
+    if snapshot.isAPIKey {
+      return DisplayFormat.currencyOrUnlimitedDisplay(snapshot.remaining)
+    }
+    return DisplayFormat.currency(snapshot.remaining)
+  }
+
+  private func usageLimits(_ usage: APIKeyUsage) -> some View {
+    VStack(alignment: .leading, spacing: 9) {
+      HStack {
+        Label("额度窗口", systemImage: "gauge.with.dots.needle.33percent")
+          .font(.caption.weight(.semibold))
+        Spacer()
+        Text(apiKeyStatusName(usage.status, isOperational: usage.isOperational))
+          .font(.caption)
+          .foregroundStyle(usage.isOperational ? Color.secondary : Color.orange)
+      }
+
+      ForEach(usageLimitRows(usage)) { row in
+        VStack(spacing: 4) {
+          HStack {
+            Text(row.title)
+            Spacer()
+            Text("\(DisplayFormat.currency(row.used)) / \(DisplayFormat.currency(row.limit))")
+              .monospacedDigit()
+          }
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+
+          ProgressView(value: row.progress)
+            .tint(row.progress >= 1 ? .orange : .accentColor)
+        }
+      }
+    }
+  }
+
+  private func usageLimitRows(_ usage: APIKeyUsage) -> [UsageLimitRow] {
+    if let quota = usage.quota, let limit = quota.limit, limit > 0 {
+      return [
+        UsageLimitRow(
+          id: "quota",
+          title: "总额度",
+          used: quota.used ?? max(0, limit - (quota.remaining ?? limit)),
+          limit: limit
+        )
+      ] + rateLimitRows(usage.rateLimits)
+    }
+
+    let rateRows = rateLimitRows(usage.rateLimits)
+    if !rateRows.isEmpty { return rateRows }
+
+    guard let subscription = usage.subscription else { return [] }
+    return [
+      subscriptionLimitRow(
+        id: "daily",
+        title: "每日",
+        used: subscription.dailyUsageUSD,
+        limit: subscription.dailyLimitUSD
+      ),
+      subscriptionLimitRow(
+        id: "weekly",
+        title: "每周",
+        used: subscription.weeklyUsageUSD,
+        limit: subscription.weeklyLimitUSD
+      ),
+      subscriptionLimitRow(
+        id: "monthly",
+        title: "每月",
+        used: subscription.monthlyUsageUSD,
+        limit: subscription.monthlyLimitUSD
+      ),
+    ].compactMap { $0 }
+  }
+
+  private func rateLimitRows(_ limits: [APIKeyRateLimit]?) -> [UsageLimitRow] {
+    (limits ?? []).compactMap { limit in
+      guard let maximum = limit.limit, maximum > 0 else { return nil }
+      return UsageLimitRow(
+        id: "rate-\(limit.window)",
+        title: limitWindowName(limit.window),
+        used: limit.used ?? max(0, maximum - (limit.remaining ?? maximum)),
+        limit: maximum
+      )
+    }
+  }
+
+  private func subscriptionLimitRow(
+    id: String,
+    title: String,
+    used: Double?,
+    limit: Double?
+  ) -> UsageLimitRow? {
+    guard let limit, limit > 0 else { return nil }
+    return UsageLimitRow(id: id, title: title, used: used ?? 0, limit: limit)
+  }
+
+  private func limitWindowName(_ window: String) -> String {
+    switch window {
+    case "5h": "5 小时"
+    case "1d": "每日"
+    case "7d": "每周"
+    default: window
+    }
+  }
+
+  private func apiKeyStatusName(_ status: String?, isOperational: Bool) -> String {
+    switch status?.lowercased() {
+    case "active": "正常"
+    case "expired": "已过期"
+    case "quota_exhausted": "额度耗尽"
+    case "disabled": "已停用"
+    default: isOperational ? "正常" : "不可用"
     }
   }
 
@@ -272,6 +409,17 @@ struct MenuBarView: View {
     case .connected: store.isHealthy ? .green : .orange
     case .failed: .red
     }
+  }
+}
+
+private struct UsageLimitRow: Identifiable {
+  let id: String
+  let title: String
+  let used: Double
+  let limit: Double
+
+  var progress: Double {
+    DisplayFormat.percentage(used: used, limit: limit) ?? 0
   }
 }
 

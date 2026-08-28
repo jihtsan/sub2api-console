@@ -63,7 +63,9 @@ public actor Sub2APIClient {
 
     if let settings = try? await fetchPublicSettings() {
       try validateAccountLoginVersion(settings.version)
-      if settings.turnstileEnabled == true || settings.tencentCaptchaEnabled == true {
+      if settings.turnstileEnabled == true || settings.tencentCaptchaEnabled == true
+        || settings.aliyunCaptchaEnabled == true
+      {
         throw Sub2APIError.captchaRequired
       }
     }
@@ -105,6 +107,7 @@ public actor Sub2APIClient {
     let usage = try await requestAPIKeyUsage(apiKey: apiKey)
     try credentialStore.saveAPIKey(apiKey)
     try credentialStore.clearSession()
+    try credentialStore.clearAdminAPIKey()
     return APIKeyMonitorSnapshot(
       usage: usage,
       publicSettings: await loadPublicSettingsBestEffort(),
@@ -119,6 +122,33 @@ public actor Sub2APIClient {
     let usage = try await requestAPIKeyUsage(apiKey: apiKey)
     return APIKeyMonitorSnapshot(
       usage: usage,
+      publicSettings: await loadPublicSettingsBestEffort(),
+      warning: compatibilityWarning()
+    )
+  }
+
+  public func connectAdminAPIKey(_ rawAPIKey: String) async throws -> AdminAPIKeyMonitorSnapshot {
+    let apiKey = rawAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !apiKey.isEmpty else { throw Sub2APIError.missingCredentials }
+
+    let stats = try await requestAdminDashboardStats(apiKey: apiKey)
+    try credentialStore.saveAdminAPIKey(apiKey)
+    try credentialStore.clearSession()
+    try credentialStore.clearAPIKey()
+    return AdminAPIKeyMonitorSnapshot(
+      stats: stats,
+      publicSettings: await loadPublicSettingsBestEffort(),
+      warning: compatibilityWarning()
+    )
+  }
+
+  public func fetchAdminAPIKeySnapshot() async throws -> AdminAPIKeyMonitorSnapshot {
+    guard let apiKey = try credentialStore.loadAdminAPIKey() else {
+      throw Sub2APIError.missingCredentials
+    }
+    let stats = try await requestAdminDashboardStats(apiKey: apiKey)
+    return AdminAPIKeyMonitorSnapshot(
+      stats: stats,
       publicSettings: await loadPublicSettingsBestEffort(),
       warning: compatibilityWarning()
     )
@@ -182,6 +212,42 @@ public actor Sub2APIClient {
     }
   }
 
+  private func requestAdminDashboardStats(apiKey: String) async throws -> AdminDashboardStats {
+    var request = URLRequest(url: try endpoint.apiURL(path: "admin/dashboard/stats"))
+    configure(&request, method: "GET", body: nil, bearerToken: nil)
+    request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+
+    let (data, response) = try await perform(request)
+    if response.statusCode == 423 {
+      throw Sub2APIError.adminComplianceRequired
+    }
+    guard (200..<300).contains(response.statusCode) else {
+      throw mapHTTPError(
+        response: response,
+        data: data,
+        authenticationLabel: "管理员 API Key"
+      )
+    }
+
+    let envelope: APIEnvelope<AdminDashboardStats>
+    do {
+      envelope = try decoder.decode(APIEnvelope<AdminDashboardStats>.self, from: data)
+    } catch {
+      throw Sub2APIError.invalidResponse
+    }
+    guard envelope.code == 0 else {
+      throw Sub2APIError.api(
+        code: envelope.code,
+        message: envelope.message,
+        reason: envelope.reason
+      )
+    }
+    guard let stats = envelope.data else {
+      throw Sub2APIError.invalidResponse
+    }
+    return stats
+  }
+
   private func persistAuthentication(_ payload: AuthPayload) throws -> LoginResult {
     if payload.requires2FA == true {
       guard let tempToken = payload.tempToken, !tempToken.isEmpty else {
@@ -205,6 +271,7 @@ public actor Sub2APIClient {
         expiresAt: expiresAt
       ))
     try credentialStore.clearAPIKey()
+    try credentialStore.clearAdminAPIKey()
     return .authenticated(user)
   }
 

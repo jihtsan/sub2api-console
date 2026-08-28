@@ -16,7 +16,7 @@
 1. **v1 默认认证应是普通 API Key。** 用户粘贴 `sk-...`，客户端用 `Authorization: Bearer <key>` 调用 `GET /v1/usage`。它只暴露该 key 自身的额度、余额、速率窗口和用量，权限明显小于后台账号或管理员密钥。
 2. **“账号登录”实际是邮箱 + 密码，不是任意用户名。** 登录后使用短期 access JWT 和轮转 refresh token。若服务端开启验证码或 TOTP，客户端必须完成对应交互；尤其 CAPTCHA 开启时，不能只做两个文本框便宣称账号登录完整可用。
 3. **“面板 Token”是 JWT access token，不是普通 API Key。** 用户直接粘贴 JWT 时可以访问与其用户/角色相符的 `/api/v1/...` 面板接口，但只有 access token 就无法调用 refresh；它过期后必须重新粘贴。两种 Bearer 凭证不能仅凭 header 名称混为一种模式。
-4. **Admin API Key 只应作为未来的显式高级模式。** 它是全局 `admin-...` 密钥，经统一 admin middleware 获得广泛管理面权限，没有细粒度 scope 或客户端可见的自动过期机制。当前 v1 没有必要支持它；管理员可通过邮箱登录或管理员 JWT 使用只读监控。
+4. **Admin API Key 只能作为显式高级只读模式。** 它是全局 `admin-...` 密钥，经统一 admin middleware 获得广泛管理面权限，没有细粒度 scope、自动过期或 IP ACL。它适合无人值守管理员监控，但客户端必须以硬编码 GET allowlist 限制其用途；管理员 JWT 仍是权限生命周期更完整的选择。
 5. **管理员摘要优先使用 snapshot-v2。** `/api/v1/admin/dashboard/snapshot-v2` 和 `/api/v1/admin/ops/dashboard/snapshot-v2` 都有 30 秒服务端缓存、`ETag` 和 `304` 支持，适合 30-60 秒轮询。
 6. **Channel Monitor 必须兼容互斥的 V1/V2 模式。** V2 的刷新周期由服务器限定为 60 或 300 秒；客户端应服从响应中的 `config.refresh_interval_seconds`，并显示 coverage/aggregation lag，而不是把聚合延迟误报成服务故障。
 
@@ -27,9 +27,9 @@
 | API Key | 普通 `sk-...` | `Authorization: Bearer <key>` | 单个 key 的额度、余额、速率限制、今日/累计/趋势/模型用量 | 默认、推荐 |
 | 邮箱登录 | 邮箱、密码；可能还有验证码/6 位 TOTP | 登录换取 access + refresh；后续 Bearer access JWT | 当前用户资料、余额、用户级用量、用户可见 Channel Monitor；管理员角色还可看 admin/Ops | 完整账户模式 |
 | 面板 Token | 单个 JWT access token | `Authorization: Bearer <access_token>` | 与签发用户和角色一致的面板范围 | 便捷模式；过期后重贴 |
-| Admin API Key（上游能力） | `admin-...` | `x-api-key: <admin-key>` | 管理仪表盘、Ops、告警、账号池、并发、完整 Channel Monitor | 暂不纳入 v1；未来高级模式 |
+| Admin API Key | `admin-...` | `x-api-key: <admin-key>` | 几乎整个管理面；监控只需 dashboard/Ops/Channel Monitor | 可选高级只读模式；强警告 |
 
-设置界面建议使用三个模式：**邮箱登录 / 面板 Token / API Key（最低权限）**。邮箱登录或面板 Token 认证后，如果 `/auth/me` 返回 `user.role == "admin"`，客户端即可加载管理员只读监控，不需要单独的管理员账号表单。Admin API Key 可保留在研究范围，但不建议进入当前 v1 UI。
+当前客户端设置界面提供三个模式：**普通 API Key（最低权限）/ Admin API Key（高级）/ 邮箱登录**。邮箱登录后，如果 `/auth/me` 返回 `user.role == "admin"`，客户端也可加载管理员只读监控。面板 Token 的契约保留在调研范围，但当前版本不提供直接粘贴 JWT 的入口。
 
 每个服务器 profile 最少保存：
 
@@ -237,16 +237,128 @@ JWT 自带 `exp`。客户端可在本地**仅解码、不信任**该时间用于
 
 ### 6.1 Admin API Key 风险边界
 
-Admin API Key 格式为 `admin-` 加 64 位十六进制随机数，生成后写入全局 settings；完整值只在生成/重新生成响应中返回一次，之后只能读取脱敏状态。来源见[生成逻辑](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/service/setting_features.go#L569-L608)和[handler](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/admin/setting_handler_runtime.go#L13-L50)。
+#### 6.1.1 创建、配置 UI 与服务端存储
 
-`/api/v1/admin` 整组先经过 admin auth；该 key 没有每-endpoint scope，验证成功后会绑定首个管理员身份，见[路由挂载](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L13-L38)和[key 校验](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/admin_auth.go#L120-L153)。部分敏感写操作另有 step-up 限制，但这不改变该 key 对监控/管理读取权限过大的事实。
+管理员在 Sub2API Web 后台的 **系统设置 -> 安全 -> 管理员 API Key** 卡片创建。官方 UI 明示它是“用于外部系统集成的全局 API Key，拥有完整的管理员权限”，支持创建、重新生成、删除，并警告完整 key 只显示一次；界面实现见[设置卡片](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/frontend/src/views/admin/SettingsView.vue#L47-L202)、[交互逻辑](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/frontend/src/views/admin/SettingsView.vue#L11650-L11709)和[官方中文文案](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/frontend/src/i18n/locales/zh/admin/settings.ts#L959-L979)。
 
-客户端侧约束：
+管理 endpoints 都是标准 admin 路由：
 
-- UI 明示“全局管理员凭证”，不要把它笼统命名为 Token。
-- 该模式的网络层只开放预先列出的 GET endpoints；不要做通用任意路径请求器。
-- 支持用户手动替换/删除 Keychain 中的 key；服务器端轮换需由用户在管理后台执行。
-- 可优先推荐管理员账户 JWT，因为它具备可撤销会话与过期生命周期，但仍须处理 captcha、TOTP 和 session binding。
+| 方法 | Endpoint | 作用 | 成功 `data` |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/admin/settings/admin-api-key` | 查询是否存在 | `{"exists":true,"masked_key":"admin-abcd...1234"}` |
+| `POST` | `/api/v1/admin/settings/admin-api-key/regenerate` | 首次创建或替换当前 key | `{"key":"admin-<64hex>"}` |
+| `DELETE` | `/api/v1/admin/settings/admin-api-key` | 删除当前 key | `{"message":"Admin API key deleted"}` |
+
+路由注册见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L554-L569)，handler 见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/admin/setting_handler_runtime.go#L13-L50)。
+
+密钥契约：
+
+- 使用 `crypto/rand` 生成 32 字节随机值，编码为 64 位小写 hex，并加 `admin-` 前缀，总长 70 字符。生成逻辑见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/service/setting_features.go#L569-L584)，prefix 常量见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/service/domain_constants.go#L702-L703)。
+- 系统只有**一个全局 key**。它以 `key = "admin_api_key"` 写入 PostgreSQL `settings` 表，重新生成通过 upsert 直接覆盖，删除执行硬删除。setting key 见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/service/domain_constants.go#L410-L412)，repository 的 upsert/delete 见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/repository/setting_repo.go#L36-L54)和[删除逻辑](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/repository/setting_repo.go#L102-L104)。
+- **应用层按明文保存完整 key，不是 hash 或密文。** `settings.value` 是普通 text 字段，见[Ent schema](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/ent/schema/setting.go#L26-L48)。“只显示一次”指管理 API/UI 之后只返回首 10 + 末 4 位脱敏值，不代表数据库不可恢复；脱敏逻辑见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/service/setting_features.go#L587-L608)。数据库/备份/运维访问者仍可能取得完整 key。
+- 没有多 key 并存、grace period、scope、描述、owner、`created_at`、独立 `expires_at` 或 revocation list。成功 regenerate 后旧 key 下一次请求立即 401；成功 DELETE 后所有使用者立即失效。
+
+特别注意：这三个 key 管理 endpoints 本身只挂普通 admin auth，**没有 step-up middleware**。因此持有有效 Admin API Key 的调用者可以读取其脱敏状态、重新生成新 key 并取得完整返回值，或删除 key。macOS 监控客户端绝不能暴露或调用这些写 endpoints。
+
+#### 6.1.2 请求头、认证优先级与身份映射
+
+外部请求必须使用：
+
+```http
+x-api-key: admin-REDACTED
+```
+
+不能把它放在 `Authorization: Bearer`，也不能放 query。admin middleware 支持两条完全不同的分支：先检查 `x-api-key` Admin API Key，再检查 Bearer JWT，见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/admin_auth.go#L24-L79)。因此：
+
+- 不要同时发送 `x-api-key` 和 `Authorization`。只要 `x-api-key` 非空，middleware 就优先验证它；错误的 admin key 会直接 401，不会回退到有效 JWT。
+- 服务端从 `settings` 读取完整值并做 constant-time exact compare。middleware 不单独检查 `admin-` prefix；格式由官方生成器保证，认证只认数据库当前值。校验分支见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/admin_auth.go#L120-L153)。
+- key 不绑定创建者。认证成功后，服务端每次选取 **ID 最小的 active admin** 作为 `UserID/role/email` 上下文；查询条件见[`GetFirstAdmin`](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/repository/user_repo.go#L1423-L1443)。没有 active admin 时返回 500 `INTERNAL_ERROR`。
+- 密码修改、JWT token version、JWT 到期、refresh token 撤销、IP/User-Agent session binding 都不会撤销 Admin API Key。它只有 regenerate/delete 两种撤销手段。
+
+#### 6.1.3 实际路由范围
+
+Admin API Key 不是只读 key，也不是只面向监控的 key。`/api/v1/admin` 整组先经过同一个 admin auth，随后才进入限流、审计和 compliance guard，见[路由挂载](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L13-L38)。这意味着它原则上能访问该组内的用户、上游账号、分组、设置、备份、系统更新、支付、用量和 Ops 等读写路由。
+
+边界对照：
+
+| Endpoint/路由组 | Admin API Key | 原因 |
+| --- | --- | --- |
+| `GET /api/v1/admin/dashboard/stats` | **可以**，compliance 通过后 | 位于统一 admin group；路由见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L281-L297) |
+| `/api/v1/admin/dashboard/*`、`/admin/ops/*`、`/admin/channel-monitor-v2/*` | **可以** | 都挂 admin auth；适合只读监控 |
+| `/api/v1/admin/channel-monitors/*`（V1） | **可以**，feature 开启时 | admin V1 路由见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L774-L799) |
+| `/api/v1/admin/payment/*` | **可以** | 该独立 route group 也显式挂 admin auth、audit、compliance，见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/payment.go#L71-L112) |
+| `GET /api/v1/pages` | **可以** | 管理页面列表单独挂 admin auth，见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/page_handler.go#L260-L283) |
+| `GET /api/v1/auth/me` | **不可以** | 只挂 JWT middleware，见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/auth.go#L250-L260) |
+| `/api/v1/usage/dashboard/*`、普通 `/api/v1/payment/*` | **不可以** | 属于用户 JWT route group，不经过 admin auth |
+| `GET /v1/usage` | **不可以** | 属于普通 `sk-...` gateway API-key middleware，不识别全局 Admin API Key |
+
+官方的外部支付集成文档明确推荐服务间调用使用 `x-api-key: admin-<64hex>`，并列出三个典型集成接口：
+
+- `POST /api/v1/admin/redeem-codes/create-and-redeem`
+- `GET /api/v1/admin/users/:id`
+- `POST /api/v1/admin/users/:id/balance`
+
+一手说明和请求示例见[官方集成文档](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/docs/ADMIN_PAYMENT_INTEGRATION_API.md#L20-L99)，对应路由见[用户管理](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L300-L324)和[兑换路由](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L526-L539)。它们不是隔离的“External Integration API”权限域，只是普通全权 admin routes；文档中的用途收窄不等于服务端 scope 收窄。
+
+#### 6.1.4 成功与错误响应
+
+admin handlers 的正常成功响应仍使用标准 envelope：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {}
+}
+```
+
+例如 `GET /api/v1/admin/dashboard/stats` 明确调用 `response.Success`，返回用户/key/账号/用量/uptime 数据，见[handler](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/admin/dashboard_handler.go#L79-L120)。
+
+认证 middleware 的错误却是更小的直接 JSON，`code` 为字符串，不是成功 envelope 的整数：
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+
+{"code":"INVALID_ADMIN_KEY","message":"Invalid admin API key"}
+```
+
+错误结构见[middleware](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/middleware.go#L63-L80)。客户端应先按 HTTP status 分流，再解析成功 envelope；不要把所有响应强制解码为同一个 `code: Int` 模型。
+
+#### 6.1.5 Compliance、step-up、审计和限流
+
+- Admin API Key 成功认证后仍经过 `AdminComplianceGuard`。尚未由其映射的首个 active admin 接受当前合规声明时，大部分 admin endpoints 返回 `423 Locked`，direct JSON code 为 `ADMIN_COMPLIANCE_ACK_REQUIRED`。只有 `/api/v1/admin/compliance` 自身绕过 guard；实现见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/admin_compliance.go#L12-L52)。客户端不应代替用户调用 `POST /compliance/accept`，而应要求管理员在官方 Web UI 阅读并确认。
+- Sub2API 对部分高风险操作提供 step-up TOTP，但 `step_up_enabled` **默认关闭**。开启时 Admin API Key 会在这些 endpoints 收到 403 `STEP_UP_ADMIN_API_KEY_FORBIDDEN`；规则见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/step_up.go#L39-L47)及[拒绝分支](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/step_up.go#L97-L107)。当前显式保护的例子包括账号/代理凭证导出、S3/备份、恢复和插件变更；路由索引见[admin routes](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/routes/admin.go#L596-L648)。这不是全局只读保护，不能依赖它约束监控客户端。
+- admin group 的所有变更请求和一组敏感 GET 会进入审计日志，`auth_method = "admin_api_key"`；key 管理的 read/regenerate/delete 也在审计映射中，见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/audit_log.go#L110-L145)。但 actor 被记为首个 active admin，并不能区分多个共享该 key 的外部客户端，见[审计归因](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/audit_log.go#L246-L257)。
+- admin group 默认受每用户 240 RPM 限流，但 `ExemptAdmin` 默认 true，所以 Admin API Key 通常豁免；管理员关闭豁免后，所有该 key 请求共享“首个 active admin”的同一个 bucket。实现见[panel limiter](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/server/middleware/panel_rate_limit.go#L48-L100)和[默认值](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/service/setting_panel_rate_limit.go#L44-L53)。客户端仍必须克制轮询并尊重 429。
+
+#### 6.1.6 版本引入点
+
+Admin API Key 由 commit [`587012396`](https://github.com/Wei-Shaw/sub2api/commit/587012396b7d40fee0193bf90b009e8f5b9d54ad) 于 2025-12-20 引入，commit 同时增加生成/删除服务、admin middleware、路由和配置 UI。GitHub 当前保留的正式 releases 从 [v0.1.136](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.136) 开始；该 release 的固定 commit [`0acf00c4`](https://github.com/Wei-Shaw/sub2api/tree/0acf00c4a1cb8906bc75e124a10668db1d7cb556) 已包含完整 Admin API Key 认证和存储逻辑，例如[固定版本 middleware](https://github.com/Wei-Shaw/sub2api/blob/0acf00c4a1cb8906bc75e124a10668db1d7cb556/backend/internal/server/middleware/admin_auth.go#L23-L76)和[生成/撤销逻辑](https://github.com/Wei-Shaw/sub2api/blob/0acf00c4a1cb8906bc75e124a10668db1d7cb556/backend/internal/service/setting_service.go#L3645-L3702)。
+
+因此可确认“最迟 v0.1.136 已发布”，但不能从当前官方 release 列表严谨断言它首次随哪个更早版本号发布。客户端支持下限仍应是本文建议的 v0.1.183，而不是因为该能力更早存在就降低整体支持下限。
+
+#### 6.1.7 macOS 客户端连接与验证流程
+
+当前只读 MVP 的连接流程：
+
+1. 用户显式选择“Admin API Key（高级）”，输入 server URL 和 `admin-...`；UI 展示完整管理员权限警告。
+2. key 暂留内存，使用 `x-api-key` 调用 `GET /api/v1/admin/dashboard/stats`；不得同时注入 Bearer JWT。
+3. 只有 Dashboard 返回有效成功 envelope 后才将 key 写入 macOS Keychain，并清除其他认证模式的本地凭据。
+4. 401 `INVALID_ADMIN_KEY` 标记凭证无效；423 `ADMIN_COMPLIANCE_ACK_REQUIRED` 引导用户去官方 Web 后台阅读并接受声明；客户端不自动调用 `POST /compliance/accept`。
+5. 后续定时刷新继续只调用同一个 Dashboard GET。网络层不提供通用管理员请求器，也不开放 `/admin/settings/admin-api-key*`、用户、账号、系统或支付写操作。
+
+未来扩展能力探测时，可先请求 `GET /api/v1/admin/compliance`。该 endpoint 会经过 admin auth，但绕过 compliance guard，且只读、轻量；成功 `data.required` 表示是否还需管理员在 Web UI 接受声明。handler 见[源码](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/admin/compliance_handler.go#L27-L40)。
+
+不应使用 `/api/v1/auth/me` 验证 Admin API Key，因为它必定走 JWT middleware。也不建议用 `/admin/settings/admin-api-key` 作为首选 probe：它受 compliance guard、会产生敏感读取审计，并额外暴露 key mask，而 `/admin/compliance` 已能在不写状态的前提下验证认证。
+
+客户端侧最终约束：
+
+- UI 明示“全局管理员凭证”，不要笼统命名为 Token。
+- Keychain 保存；不放 UserDefaults、日志、崩溃报告、剪贴板自动回填或 URL。
+- 只开放预先列出的 GET endpoints；不要做通用任意路径请求器。
+- 支持用户手动替换/删除本机 Keychain 项；服务器端 regenerate/delete 必须由用户在官方 Web 管理后台操作。
+- 一台服务器只有一个全局 key，多个客户端共享会降低可追责性；需要个体撤销和短期生命周期时优先使用管理员 JWT。
 
 ### 6.2 管理总览
 
@@ -254,11 +366,11 @@ Admin API Key 格式为 `admin-` 加 64 位十六进制随机数，生成后写�
 
 ```http
 GET /api/v1/admin/dashboard/snapshot-v2?include_stats=true&include_trend=false&include_model_stats=false&include_group_stats=false HTTP/1.1
-Authorization: Bearer eyJ...ADMIN-JWT-REDACTED
+x-api-key: admin-REDACTED
 If-None-Match: "previous-etag"
 ```
 
-若未来支持 Admin API Key，上述认证行改为 `x-api-key: admin-REDACTED`；响应契约相同。
+管理员 JWT 也可把认证行改为 `Authorization: Bearer eyJ...ADMIN-JWT-REDACTED`；两种凭证的响应契约相同，但不得同时发送两个认证 header。
 
 `data.stats` 包含：
 
@@ -279,9 +391,11 @@ If-None-Match: "previous-etag"
 
 ```http
 GET /api/v1/admin/ops/dashboard/snapshot-v2?time_range=1h HTTP/1.1
-Authorization: Bearer eyJ...ADMIN-JWT-REDACTED
+x-api-key: admin-REDACTED
 If-None-Match: "previous-etag"
 ```
+
+使用管理员 JWT 时改发 `Authorization: Bearer eyJ...ADMIN-JWT-REDACTED`，不要同时发送 `x-api-key`。
 
 返回 `data.generated_at` 及三块数据：
 
@@ -314,7 +428,7 @@ If-None-Match: "previous-etag"
 }
 ```
 
-- 管理员 JWT 的浏览器兼容方案是 subprotocol `['sub2api-admin', 'jwt.<token>']`；原生 macOS WebSocket handshake 可使用普通 `Authorization: Bearer ...`。未来若启用 Admin API Key，也可用 `x-api-key`。
+- 管理员 JWT 的浏览器兼容方案是 subprotocol `['sub2api-admin', 'jwt.<token>']`；原生 macOS WebSocket handshake 可使用普通 `Authorization: Bearer ...`。Admin API Key 已可通过 handshake 的 `x-api-key` 使用，两种认证 header 不应同时发送。
 - 服务端每 2 秒推送，底层统计最多每 5 秒刷新，统计窗口为 1 分钟，见[常量和 payload](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/admin/ops_ws_handler.go#L46-L59)及[构造逻辑](https://github.com/Wei-Shaw/sub2api/blob/e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8/backend/internal/handler/admin/ops_ws_handler.go#L253-L279)。
 - 推荐只在 popover 展开并选择实时视图时连接；后台驻留继续使用 snapshot。这样可以避免永久连接、重连抖动和不必要的服务器压力。
 
@@ -455,11 +569,11 @@ popover 顶部保持稳定：服务器名称、整体状态、主指标、最近
 
 ### 11.2 能力时间线
 
-基于 git tag 历史：
+基于当前 GitHub 仍保留的 release tags 和对应 commits。`v0.1.136` 只用于证明这些能力最迟已在该版本公开，不能据此断言它们首次随该版本发布：
 
-| 最低 release | 已包含的相关能力 |
+| 官方可核验节点 | 已包含的相关能力 |
 | --- | --- |
-| [v0.1.136](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.136) | Admin API Key、refresh token、dashboard snapshot-v2、`/v1/usage` |
+| [v0.1.136](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.136) | 当前保留的最早正式 release；固定 commit 已包含 Admin API Key、refresh token、dashboard snapshot-v2、`/v1/usage` |
 | [v0.1.173](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.173) | Channel Monitor V2 |
 | [v0.1.183](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.183) | 调研时最新正式版、建议最低支持版本 |
 
@@ -469,7 +583,7 @@ popover 顶部保持稳定：服务器名称、整体状态、主指标、最近
 
 1. `GET /health`。
 2. `GET /api/v1/settings/public`，记录 `version`、`server_timezone`、captcha/TOTP 和 Channel Monitor flags。
-3. 验证用户选择的凭证：API Key 直接试 `/v1/usage`；邮箱登录完成后试 `/auth/me`；面板 Token 直接试 `/auth/me`。后二者若角色为 admin，再试最小 admin snapshot。
+3. 验证用户选择的凭证：API Key 直接试 `/v1/usage`；Admin API Key 试 `/admin/compliance`；邮箱登录完成后试 `/auth/me`；面板 Token 直接试 `/auth/me`。账户类凭证若角色为 admin，再试最小 admin snapshot；Admin API Key 在 compliance 已确认后再试。
 4. 管理员先试 `/admin/dashboard/snapshot-v2`；404 回退 `/admin/dashboard/stats`。
 5. 普通账户摘要使用 `/usage/dashboard/stats`；趋势先试 `/usage/dashboard/snapshot-v2`，404 时回退 `/dashboard/trend` + `/dashboard/models`。
 6. `channel_monitor_mode == v2` 时试 V2 snapshot；404 或明确 mode mismatch 时再试 V1。mode 为 V1 或关闭时不要无意义探测 V2。
@@ -485,7 +599,7 @@ popover 顶部保持稳定：服务器名称、整体状态、主指标、最近
 - 生产服务器只允许 HTTPS；不要提供“忽略证书错误”。本地开发 HTTP 若要支持，应限 loopback 并显式标注不安全。
 - URLSession/网络日志统一 redact `Authorization`、`x-api-key`、login/refresh body、WebSocket protocol token。
 - 管理员模式只发白名单 GET；不在客户端提供生成、轮换、删除 admin key 的写操作。
-- 401 时只有“邮箱登录”且持有 refresh token 的 profile 才 refresh，最多一次；面板 Token、API key 和未来的 admin key 都不自动尝试账号登录。
+- 401 时只有“邮箱登录”且持有 refresh token 的 profile 才 refresh，最多一次；面板 Token、普通 API Key 和 Admin API Key 都不自动尝试账号登录。
 - 429 尊重 `Retry-After`，5xx 与网络错误指数退避并加少量 jitter，防止多个客户端同步重试。
 - 不在通知内容展示余额以外的敏感账号、错误详情或 key 片段；锁屏通知尤其如此。
 - 不允许 token 出现在 query string。WebSocket 优先 header；使用 JWT subprotocol 时也不得打印握手 header。
@@ -496,14 +610,14 @@ popover 顶部保持稳定：服务器名称、整体状态、主指标、最近
 首个可用版本建议控制在：
 
 1. 多 server profile 基础模型，但 UI 先支持一个 active profile。
-2. 邮箱登录、面板 Token、低权限 API Key 三种认证；邮箱登录必须同时完成 CAPTCHA/TOTP/refresh，面板 Token 过期后明确要求重贴。
+2. 邮箱登录、低权限普通 API Key 和 Admin API Key 三种认证；邮箱登录处理 TOTP/refresh，CAPTCHA 开启时引导改用 Key。Admin API Key 启用前强提示其全局权限，当前仅允许固定的只读 Dashboard GET。
 3. `/health` + public settings capability probe。
 4. `/v1/usage` 的 quota/unrestricted 两种解析。
 5. admin dashboard + ops snapshot，带 ETag。
 6. Channel Monitor V1/V2 自动适配。
 7. Keychain、状态分层、退避、阈值通知。
 
-Admin API Key、WebSocket、告警详情、账号级 drill-down、复杂趋势筛选可以放在后续版本。这样 v1 已能覆盖“余额/额度监控”和“Sub2API 实例运维监控”两个核心场景，同时避免一开始承担全量管理控制台的权限与复杂度。
+Admin API Key 即使纳入 v1，也只能通过硬编码 GET allowlist 提供 dashboard/Ops/Channel Monitor 监控，不提供任意路径或 key 管理操作；不需要无人值守系统级监控的用户无需看到该模式。WebSocket、告警详情、账号级 drill-down、复杂趋势筛选可以放在后续版本。这样 v1 已能覆盖“余额/额度监控”和“Sub2API 实例运维监控”两个核心场景，同时避免承担全量管理控制台的权限与复杂度。
 
 ## 14. 主要源码索引
 

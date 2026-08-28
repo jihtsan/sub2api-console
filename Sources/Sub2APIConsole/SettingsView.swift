@@ -22,7 +22,7 @@ struct SettingsView: View {
           Label("关于", systemImage: "info.circle")
         }
     }
-    .frame(width: 520, height: 390)
+    .frame(width: 520, height: 420)
     .onAppear { store.start() }
   }
 }
@@ -36,6 +36,7 @@ private struct ConnectionSettingsView: View {
   @State private var authenticationMode: AuthenticationMode
   @State private var password = ""
   @State private var apiKey = ""
+  @State private var adminAPIKey = ""
   @State private var twoFactorCode = ""
 
   init(store: MonitorStore) {
@@ -66,27 +67,51 @@ private struct ConnectionSettingsView: View {
 
       Section("认证") {
         Picker("方式", selection: $authenticationMode) {
-          Text("API Key").tag(AuthenticationMode.apiKey)
+          Text("普通 Key").tag(AuthenticationMode.apiKey)
+          Text("管理员 Key").tag(AuthenticationMode.adminAPIKey)
           Text("账户").tag(AuthenticationMode.account)
         }
         .pickerStyle(.segmented)
+        .onChange(of: authenticationMode) { _, _ in
+          store.cancelPendingLogin()
+          password = ""
+          apiKey = ""
+          adminAPIKey = ""
+          twoFactorCode = ""
+        }
 
-        if authenticationMode == .account {
+        switch authenticationMode {
+        case .account:
           TextField("邮箱", text: $email)
             .textContentType(.emailAddress)
           SecureField("密码", text: $password)
             .textContentType(.password)
 
           if store.pendingTwoFactorEmail != nil {
-            SecureField("两步验证码", text: $twoFactorCode)
-              .textContentType(.oneTimeCode)
-              .onChange(of: twoFactorCode) { _, value in
-                twoFactorCode = String(value.filter(\.isNumber).prefix(6))
-              }
+            SecureField(
+              "两步验证码",
+              text: $twoFactorCode,
+              prompt: Text(store.pendingTwoFactorEmail ?? "6 位验证码")
+            )
+            .textContentType(.oneTimeCode)
+            .onChange(of: twoFactorCode) { _, value in
+              twoFactorCode = String(value.filter(\.isNumber).prefix(6))
+            }
           }
-        } else {
-          SecureField("API Key", text: $apiKey)
+        case .apiKey:
+          SecureField("普通 API Key", text: $apiKey, prompt: Text("sk-..."))
             .textContentType(.password)
+        case .adminAPIKey:
+          SecureField("管理员 API Key", text: $adminAPIKey, prompt: Text("admin-..."))
+            .textContentType(.password)
+
+          Label(
+            "此密钥拥有完整的管理员权限，请妥善保管。",
+            systemImage: "exclamationmark.triangle.fill"
+          )
+          .font(.caption)
+          .foregroundStyle(.orange)
+          .fixedSize(horizontal: false, vertical: true)
         }
       }
 
@@ -95,7 +120,7 @@ private struct ConnectionSettingsView: View {
           connectionStatus
           Spacer()
 
-          if store.snapshot != nil {
+          if store.isConfigured {
             Button("断开连接", role: .destructive) {
               Task { await store.disconnect() }
             }
@@ -143,7 +168,8 @@ private struct ConnectionSettingsView: View {
     guard !serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return false
     }
-    if store.pendingTwoFactorEmail != nil {
+    guard !isInsecureRemoteHTTP || settings.allowInsecureHTTP else { return false }
+    if authenticationMode == .account, store.pendingTwoFactorEmail != nil {
       return twoFactorCode.count == 6
     }
     switch authenticationMode {
@@ -151,6 +177,8 @@ private struct ConnectionSettingsView: View {
       return !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
     case .apiKey:
       return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    case .adminAPIKey:
+      return !adminAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
   }
 
@@ -166,7 +194,7 @@ private struct ConnectionSettingsView: View {
 
   private func connect() {
     Task {
-      if store.pendingTwoFactorEmail != nil {
+      if authenticationMode == .account, store.pendingTwoFactorEmail != nil {
         await store.completeTwoFactor(
           code: twoFactorCode,
           serverAddress: serverAddress,
@@ -196,6 +224,14 @@ private struct ConnectionSettingsView: View {
         )
         if store.state == .connected {
           apiKey = ""
+        }
+      case .adminAPIKey:
+        await store.connectWithAdminAPIKey(
+          serverAddress: serverAddress,
+          apiKey: adminAPIKey
+        )
+        if store.state == .connected {
+          adminAPIKey = ""
         }
       }
     }

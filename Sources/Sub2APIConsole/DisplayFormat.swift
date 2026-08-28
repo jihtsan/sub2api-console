@@ -71,7 +71,7 @@ enum DisplayFormat {
 
   static func metricName(_ metric: MenuBarMetric) -> String {
     switch metric {
-    case .remaining: "可用额度"
+    case .remaining: "余额 / 可用账户"
     case .todayCost: "今日消费"
     case .todayRequests: "今日请求"
     case .rpm: "RPM"
