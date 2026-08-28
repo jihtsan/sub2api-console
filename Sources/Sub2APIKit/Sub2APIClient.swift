@@ -132,13 +132,15 @@ public actor Sub2APIClient {
     guard !apiKey.isEmpty else { throw Sub2APIError.missingCredentials }
 
     let stats = try await requestAdminDashboardStats(apiKey: apiKey)
+    let accountResult = await loadAdminAccountSnapshots(apiKey: apiKey)
     try credentialStore.saveAdminAPIKey(apiKey)
     try credentialStore.clearSession()
     try credentialStore.clearAPIKey()
     return AdminAPIKeyMonitorSnapshot(
       stats: stats,
+      adminAccounts: accountResult.accounts,
       publicSettings: await loadPublicSettingsBestEffort(),
-      warning: compatibilityWarning()
+      warning: combinedWarning(compatibilityWarning(), accountResult.warning)
     )
   }
 
@@ -147,10 +149,12 @@ public actor Sub2APIClient {
       throw Sub2APIError.missingCredentials
     }
     let stats = try await requestAdminDashboardStats(apiKey: apiKey)
+    let accountResult = await loadAdminAccountSnapshots(apiKey: apiKey)
     return AdminAPIKeyMonitorSnapshot(
       stats: stats,
+      adminAccounts: accountResult.accounts,
       publicSettings: await loadPublicSettingsBestEffort(),
-      warning: compatibilityWarning()
+      warning: combinedWarning(compatibilityWarning(), accountResult.warning)
     )
   }
 
@@ -162,12 +166,19 @@ public actor Sub2APIClient {
     )
 
     var adminStats: AdminDashboardStats?
+    var adminAccounts: [AdminAccountSnapshot] = []
     var warnings: [String] = []
     if user.isAdmin {
       do {
         adminStats = try await authorizedPanelRequest(path: "admin/dashboard/stats")
       } catch {
         warnings.append("管理员统计暂不可用：\(error.localizedDescription)")
+      }
+
+      let accountResult = await loadAdminAccountSnapshots(apiKey: nil)
+      adminAccounts = accountResult.accounts
+      if let warning = accountResult.warning {
+        warnings.append(warning)
       }
     }
 
@@ -179,8 +190,27 @@ public actor Sub2APIClient {
       user: user,
       userStats: userStats,
       adminStats: adminStats,
+      adminAccounts: adminAccounts,
       publicSettings: publicSettings,
       warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n")
+    )
+  }
+
+  public func refreshOpenAIQuota(accountID: Int64) async throws -> OpenAIQuotaRefreshResult {
+    try await requestAdminAuthorized(
+      path: "admin/openai/accounts/\(accountID)/quota/refresh",
+      method: "POST",
+      body: nil,
+      timeoutInterval: 60
+    )
+  }
+
+  public func resetOpenAIQuota(accountID: Int64) async throws -> OpenAIQuotaResetResult {
+    try await requestAdminAuthorized(
+      path: "admin/openai/accounts/\(accountID)/reset-quota",
+      method: "POST",
+      body: nil,
+      timeoutInterval: 90
     )
   }
 
@@ -212,26 +242,182 @@ public actor Sub2APIClient {
     }
   }
 
-  private func requestAdminDashboardStats(apiKey: String) async throws -> AdminDashboardStats {
-    var request = URLRequest(url: try endpoint.apiURL(path: "admin/dashboard/stats"))
-    configure(&request, method: "GET", body: nil, bearerToken: nil)
+  private func loadAdminAccountSnapshots(apiKey: String?) async -> (
+    accounts: [AdminAccountSnapshot],
+    warning: String?
+  ) {
+    do {
+      return (try await fetchAdminAccountSnapshots(apiKey: apiKey), nil)
+    } catch {
+      return ([], "账号列表暂不可用：\(error.localizedDescription)")
+    }
+  }
+
+  private func fetchAdminAccountSnapshots(apiKey: String?) async throws -> [AdminAccountSnapshot] {
+    let pageSize = 100
+    var page = try await requestAdminAccountPage(page: 1, pageSize: pageSize, apiKey: apiKey)
+    var accounts = page.items
+
+    if page.pages > 1 {
+      for pageNumber in 2...page.pages {
+        try Task.checkCancellation()
+        page = try await requestAdminAccountPage(
+          page: pageNumber,
+          pageSize: pageSize,
+          apiKey: apiKey
+        )
+        accounts.append(contentsOf: page.items)
+      }
+    }
+
+    guard !accounts.isEmpty else { return [] }
+
+    let accountIDs = accounts
+      .filter(supportsAdminAccountUsage)
+      .map(\.id)
+    guard !accountIDs.isEmpty else {
+      return accounts.map { AdminAccountSnapshot(account: $0) }
+    }
+
+    let usageResult: AdminAccountUsageBatchResponse
+    do {
+      usageResult = try await requestAdminAccountUsage(
+        accountIDs: accountIDs,
+        apiKey: apiKey
+      )
+    } catch {
+      return accounts.map {
+        AdminAccountSnapshot(account: $0, usageError: error.localizedDescription)
+      }
+    }
+
+    return accounts.map { account in
+      let key = String(account.id)
+      return AdminAccountSnapshot(
+        account: account,
+        usage: usageResult.usage[key],
+        usageError: usageResult.errors[key]
+      )
+    }
+  }
+
+  private func supportsAdminAccountUsage(_ account: AdminAccount) -> Bool {
+    switch (account.platform.lowercased(), account.type.lowercased()) {
+    case ("anthropic", "oauth"), ("anthropic", "setup-token"):
+      true
+    case ("openai", "oauth"), ("gemini", _), ("antigravity", "oauth"), ("grok", "oauth"):
+      true
+    default:
+      false
+    }
+  }
+
+  private func requestAdminAccountPage(
+    page: Int,
+    pageSize: Int,
+    apiKey: String?
+  ) async throws -> AdminAccountPage {
+    let queryItems = [
+      URLQueryItem(name: "page", value: String(page)),
+      URLQueryItem(name: "page_size", value: String(pageSize)),
+      URLQueryItem(name: "lite", value: "true"),
+      URLQueryItem(name: "sort_by", value: "name"),
+      URLQueryItem(name: "sort_order", value: "asc"),
+    ]
+
+    if let apiKey {
+      return try await adminAPIKeyRequest(
+        path: "admin/accounts",
+        method: "GET",
+        body: nil,
+        queryItems: queryItems,
+        apiKey: apiKey
+      )
+    }
+    return try await authorizedPanelRequest(
+      path: "admin/accounts",
+      method: "GET",
+      body: nil,
+      queryItems: queryItems
+    )
+  }
+
+  private func requestAdminAccountUsage(
+    accountIDs: [Int64],
+    apiKey: String?
+  ) async throws -> AdminAccountUsageBatchResponse {
+    struct BatchUsageRequest: Encodable {
+      let accountIDs: [Int64]
+      let force: Bool
+    }
+
+    let body = try encoder.encode(BatchUsageRequest(accountIDs: accountIDs, force: false))
+    if let apiKey {
+      return try await adminAPIKeyRequest(
+        path: "admin/accounts/usage/batch",
+        method: "POST",
+        body: body,
+        queryItems: [],
+        apiKey: apiKey
+      )
+    }
+    return try await authorizedPanelRequest(
+      path: "admin/accounts/usage/batch",
+      method: "POST",
+      body: body
+    )
+  }
+
+  private func requestAdminAuthorized<Payload: Decodable & Sendable>(
+    path: String,
+    method: String,
+    body: Data?,
+    timeoutInterval: TimeInterval
+  ) async throws -> Payload {
+    if let apiKey = try credentialStore.loadAdminAPIKey() {
+      return try await adminAPIKeyRequest(
+        path: path,
+        method: method,
+        body: body,
+        queryItems: [],
+        apiKey: apiKey,
+        timeoutInterval: timeoutInterval
+      )
+    }
+    return try await authorizedPanelRequest(
+      path: path,
+      method: method,
+      body: body,
+      timeoutInterval: timeoutInterval
+    )
+  }
+
+  private func adminAPIKeyRequest<Payload: Decodable & Sendable>(
+    path: String,
+    method: String,
+    body: Data?,
+    queryItems: [URLQueryItem],
+    apiKey: String,
+    timeoutInterval: TimeInterval = 30
+  ) async throws -> Payload {
+    var request = URLRequest(url: try endpoint.apiURL(path: path, queryItems: queryItems))
+    configure(
+      &request,
+      method: method,
+      body: body,
+      bearerToken: nil,
+      timeoutInterval: timeoutInterval
+    )
     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
 
     let (data, response) = try await perform(request)
-    if response.statusCode == 423 {
-      throw Sub2APIError.adminComplianceRequired
-    }
     guard (200..<300).contains(response.statusCode) else {
-      throw mapHTTPError(
-        response: response,
-        data: data,
-        authenticationLabel: "管理员 API Key"
-      )
+      throw mapHTTPError(response: response, data: data, authenticationLabel: "管理员 API Key")
     }
 
-    let envelope: APIEnvelope<AdminDashboardStats>
+    let envelope: APIEnvelope<Payload>
     do {
-      envelope = try decoder.decode(APIEnvelope<AdminDashboardStats>.self, from: data)
+      envelope = try decoder.decode(APIEnvelope<Payload>.self, from: data)
     } catch {
       throw Sub2APIError.invalidResponse
     }
@@ -242,10 +428,27 @@ public actor Sub2APIClient {
         reason: envelope.reason
       )
     }
-    guard let stats = envelope.data else {
+    guard let payload = envelope.data else {
       throw Sub2APIError.invalidResponse
     }
-    return stats
+    return payload
+  }
+
+  private func requestAdminDashboardStats(apiKey: String) async throws -> AdminDashboardStats {
+    do {
+      return try await adminAPIKeyRequest(
+        path: "admin/dashboard/stats",
+        method: "GET",
+        body: nil,
+        queryItems: [],
+        apiKey: apiKey
+      )
+    } catch let error as Sub2APIError {
+      if case .http(let status, _) = error, status == 423 {
+        throw Sub2APIError.adminComplianceRequired
+      }
+      throw error
+    }
   }
 
   private func persistAuthentication(_ payload: AuthPayload) throws -> LoginResult {
@@ -277,7 +480,10 @@ public actor Sub2APIClient {
 
   private func authorizedPanelRequest<Payload: Decodable & Sendable>(
     path: String,
-    queryItems: [URLQueryItem] = []
+    method: String = "GET",
+    body: Data? = nil,
+    queryItems: [URLQueryItem] = [],
+    timeoutInterval: TimeInterval = 30
   ) async throws -> Payload {
     guard var storedSession = try credentialStore.loadSession() else {
       throw Sub2APIError.missingCredentials
@@ -293,10 +499,11 @@ public actor Sub2APIClient {
     do {
       return try await panelRequest(
         path: path,
-        method: "GET",
-        body: nil,
+        method: method,
+        body: body,
         accessToken: storedSession.accessToken,
-        queryItems: queryItems
+        queryItems: queryItems,
+        timeoutInterval: timeoutInterval
       )
     } catch let error as Sub2APIError {
       guard case .unauthorized = error, storedSession.refreshToken != nil else {
@@ -306,10 +513,11 @@ public actor Sub2APIClient {
       let refreshed = try await refreshSession(storedSession)
       return try await panelRequest(
         path: path,
-        method: "GET",
-        body: nil,
+        method: method,
+        body: body,
         accessToken: refreshed.accessToken,
-        queryItems: queryItems
+        queryItems: queryItems,
+        timeoutInterval: timeoutInterval
       )
     }
   }
@@ -343,10 +551,17 @@ public actor Sub2APIClient {
     method: String,
     body: Data?,
     accessToken: String?,
-    queryItems: [URLQueryItem] = []
+    queryItems: [URLQueryItem] = [],
+    timeoutInterval: TimeInterval = 30
   ) async throws -> Payload {
     var request = URLRequest(url: try endpoint.apiURL(path: path, queryItems: queryItems))
-    configure(&request, method: method, body: body, bearerToken: accessToken)
+    configure(
+      &request,
+      method: method,
+      body: body,
+      bearerToken: accessToken,
+      timeoutInterval: timeoutInterval
+    )
 
     let (data, response) = try await perform(request)
     guard (200..<300).contains(response.statusCode) else {
@@ -374,11 +589,12 @@ public actor Sub2APIClient {
     _ request: inout URLRequest,
     method: String,
     body: Data?,
-    bearerToken: String?
+    bearerToken: String?,
+    timeoutInterval: TimeInterval = 30
   ) {
     request.httpMethod = method
     request.httpBody = body
-    request.timeoutInterval = 30
+    request.timeoutInterval = timeoutInterval
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("zh-CN", forHTTPHeaderField: "Accept-Language")
@@ -447,6 +663,10 @@ public actor Sub2APIClient {
     return try? await fetchPublicSettings()
   }
 
+  private func combinedWarning(_ first: String?, _ second: String?) -> String? {
+    [first, second].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n").nilIfEmpty
+  }
+
   private func validateAccountLoginVersion(_ versionString: String?) throws {
     guard let versionString, let version = ServerVersion(versionString) else { return }
     guard version >= Self.minimumSafeAccountVersion else {
@@ -463,4 +683,8 @@ public actor Sub2APIClient {
     }
     return "服务器 \(versionString) 低于已验证的 v0.1.183，部分监控统计可能不准确。"
   }
+}
+
+private extension String {
+  var nilIfEmpty: String? { isEmpty ? nil : self }
 }

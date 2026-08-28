@@ -67,6 +67,154 @@ final class ModelDecodingTests: XCTestCase {
     XCTAssertEqual(stats.unhealthyAccounts, 6)
   }
 
+  func testDecodesAdminAccountListWithCodexSevenDayUsageAndHealthState() throws {
+    let json = Data(
+      """
+      {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "items": [
+            {
+              "id": 42,
+              "name": "primary-openai",
+              "platform": "openai",
+              "type": "oauth",
+              "status": "active",
+              "schedulable": false,
+              "rate_limited_at": "2026-08-28T10:00:00Z",
+              "rate_limit_reset_at": "2026-08-28T16:00:00Z",
+              "extra": {
+                "codex_7d_used_percent": 72.5,
+                "codex_7d_reset_after_seconds": 86400,
+                "codex_7d_reset_at": "2026-08-29T10:00:00Z",
+                "future_field": "ignored"
+              }
+            }
+          ],
+          "total": 1,
+          "page": 1,
+          "page_size": 100,
+          "pages": 1
+        }
+      }
+      """.utf8
+    )
+
+    let envelope = try JSONDecoder().decode(
+      APIEnvelope<AdminAccountPage>.self,
+      from: json
+    )
+    let account = try XCTUnwrap(envelope.data?.items.first)
+    let snapshot = AdminAccountSnapshot(account: account)
+
+    XCTAssertEqual(account.id, 42)
+    XCTAssertTrue(account.isRateLimited)
+    XCTAssertFalse(account.schedulable ?? true)
+    XCTAssertEqual(snapshot.sevenDayUsagePercent, 72.5)
+    XCTAssertEqual(snapshot.sevenDayRemainingSeconds, 86_400)
+    XCTAssertEqual(snapshot.sevenDayResetAt, "2026-08-29T10:00:00Z")
+  }
+
+  func testUsesGenericSevenDayUsageWhenCodexSnapshotIsMissing() throws {
+    let json = Data(
+      """
+      {
+        "usage": {
+          "42": {
+            "updated_at": "2026-08-28T10:05:00Z",
+            "seven_day": {
+              "utilization": 31.25,
+              "resets_at": "2026-09-01T10:00:00Z",
+              "remaining_seconds": 345600
+            }
+          }
+        },
+        "errors": {}
+      }
+      """.utf8
+    )
+
+    let batch = try JSONDecoder().decode(AdminAccountUsageBatchResponse.self, from: json)
+    let usage = try XCTUnwrap(batch.usage["42"])
+    let progress = try XCTUnwrap(usage.sevenDay)
+
+    XCTAssertEqual(progress.utilization, 31.25)
+    XCTAssertEqual(progress.remainingSeconds, 345_600)
+    XCTAssertEqual(progress.resetsAt, "2026-09-01T10:00:00Z")
+    XCTAssertTrue(batch.errors.isEmpty)
+  }
+
+  func testDecodesOpenAIQuotaRefreshAndResetCredits() throws {
+    let refreshJSON = Data(
+      """
+      {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "email": "operator@example.com",
+          "plan_type": "plus",
+          "rate_limit": {
+            "allowed": false,
+            "limit_reached": true,
+            "primary_window": {
+              "used_percent": 100,
+              "limit_window_seconds": 18000,
+              "reset_after_seconds": 900,
+              "reset_at": 1788000000
+            }
+          },
+          "rate_limit_reset_credits": {
+            "available_count": 3,
+            "credits": [{"expires_at": "2026-09-01T00:00:00Z"}]
+          },
+          "fetched_at": 1787999100,
+          "cache_persisted": true
+        }
+      }
+      """.utf8
+    )
+    let refresh = try JSONDecoder().decode(
+      APIEnvelope<OpenAIQuotaRefreshResult>.self,
+      from: refreshJSON
+    )
+
+    XCTAssertEqual(refresh.data?.email, "operator@example.com")
+    XCTAssertEqual(refresh.data?.usage.availableResetCount, 3)
+    XCTAssertEqual(refresh.data?.rateLimit?.primaryWindow?.resetAfterSeconds, 900)
+    XCTAssertTrue(refresh.data?.cachePersisted == true)
+
+    let resetJSON = Data(
+      """
+      {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "code": "reset_success",
+          "windows_reset": 1,
+          "quota": {
+            "rate_limit_reset_credits": {"available_count": 2},
+            "fetched_at": 1787999200
+          },
+          "cache_refreshed": true,
+          "account_state_recovered": true,
+          "warning_code": "account_state_refresh_failed"
+        }
+      }
+      """.utf8
+    )
+    let reset = try JSONDecoder().decode(
+      APIEnvelope<OpenAIQuotaResetResult>.self,
+      from: resetJSON
+    )
+
+    XCTAssertEqual(reset.data?.code, "reset_success")
+    XCTAssertEqual(reset.data?.windowsReset, 1)
+    XCTAssertEqual(reset.data?.quota?.availableResetCount, 2)
+    XCTAssertTrue(reset.data?.cacheRefreshed == true)
+    XCTAssertEqual(reset.data?.warningCode, "account_state_refresh_failed")
+  }
+
   func testDecodesQuotaLimitedAPIKeyUsageWithoutTrustingIsValidAlone() throws {
     let json = Data(
       """

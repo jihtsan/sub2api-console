@@ -84,4 +84,10 @@ enum DisplayFormat {
     guard let used, let limit, limit > 0 else { return nil }
     return min(max(used / limit, 0), 1)
   }
+
+  static func percentageText(_ value: Double) -> String {
+    let clamped = min(max(value, 0), 100)
+    let fractionLength = clamped >= 10 ? 0 : 1
+    return "\(clamped.formatted(.number.precision(.fractionLength(fractionLength))))%"
+  }
 }

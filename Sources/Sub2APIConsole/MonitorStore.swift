@@ -9,12 +9,27 @@ enum ConnectionState: Equatable {
   case failed(String)
 }
 
+enum AdminAccountAction: Equatable {
+  case queryResetCredits(Int64)
+  case resetOpenAIQuota(Int64)
+
+  var accountID: Int64 {
+    switch self {
+    case .queryResetCredits(let accountID), .resetOpenAIQuota(let accountID): accountID
+    }
+  }
+}
+
 @MainActor
 final class MonitorStore: ObservableObject {
   @Published private(set) var state: ConnectionState = .unconfigured
   @Published private(set) var snapshot: MonitorSnapshot?
   @Published private(set) var isRefreshing = false
   @Published private(set) var pendingTwoFactorEmail: String?
+  @Published private(set) var accountAction: AdminAccountAction?
+  @Published private(set) var accountActionError: String?
+  @Published private(set) var openAIQuotaByAccountID: [Int64: OpenAIQuotaUsage] = [:]
+  @Published private(set) var openAIQuotaErrorByAccountID: [Int64: String] = [:]
 
   let settings: SettingsStore
 
@@ -186,6 +201,7 @@ final class MonitorStore: ObservableObject {
       state = .connected
       consecutiveFailures = 0
       retryAfterSeconds = nil
+      accountActionError = nil
     } catch is CancellationError {
       return
     } catch {
@@ -210,6 +226,10 @@ final class MonitorStore: ObservableObject {
     client = nil
     activeMode = nil
     snapshot = nil
+    accountAction = nil
+    accountActionError = nil
+    openAIQuotaByAccountID = [:]
+    openAIQuotaErrorByAccountID = [:]
     resetPendingAuthentication()
     consecutiveFailures = 0
     retryAfterSeconds = nil
@@ -246,6 +266,26 @@ final class MonitorStore: ObservableObject {
   func refreshAfterWake() {
     guard client != nil else { return }
     Task { await refresh() }
+  }
+
+  func refreshOpenAIQuota(_ accountID: Int64) async {
+    await performAccountAction(.queryResetCredits(accountID))
+  }
+
+  func resetOpenAIQuota(_ accountID: Int64) async {
+    await performAccountAction(.resetOpenAIQuota(accountID))
+  }
+
+  func openAIQuota(for accountID: Int64) -> OpenAIQuotaUsage? {
+    openAIQuotaByAccountID[accountID]
+  }
+
+  func openAIQuotaError(for accountID: Int64) -> String? {
+    openAIQuotaErrorByAccountID[accountID]
+  }
+
+  func isAccountActionInProgress(_ accountID: Int64) -> Bool {
+    accountAction?.accountID == accountID
   }
 
   func cancelPendingLogin() {
@@ -397,6 +437,10 @@ final class MonitorStore: ObservableObject {
     if activeMode != mode {
       snapshot = nil
     }
+    accountAction = nil
+    accountActionError = nil
+    openAIQuotaByAccountID = [:]
+    openAIQuotaErrorByAccountID = [:]
     self.client = client
     activeMode = mode
     settings.serverAddress = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -439,5 +483,75 @@ final class MonitorStore: ObservableObject {
     guard let total = stats.totalAccounts else { return nil }
     let normal = stats.normalAccounts ?? max(total - stats.unhealthyAccounts, 0)
     return "\(normal)/\(total) 可用"
+  }
+
+  private func performAccountAction(_ action: AdminAccountAction) async {
+    guard snapshot?.supportsAdminAccountList == true else {
+      accountActionError = "当前连接没有管理员账号操作权限。"
+      return
+    }
+    guard let account = snapshot?.adminAccounts.first(where: { $0.id == action.accountID }),
+      account.account.isOpenAIOAuth,
+      !account.account.isShadow
+    else {
+      accountActionError = "只有非影子 OpenAI OAuth 账号支持该操作。"
+      return
+    }
+    if case .resetOpenAIQuota = action,
+      openAIQuotaByAccountID[action.accountID]?.availableResetCount ?? 0 <= 0
+    {
+      accountActionError = "请先查询可用重置次数，且当前账号没有可用的重置次数。"
+      return
+    }
+    guard accountAction == nil else { return }
+    guard let client else {
+      accountActionError = "尚未建立服务器连接。"
+      return
+    }
+
+    accountAction = action
+    accountActionError = nil
+    defer { accountAction = nil }
+
+    do {
+      var resetWarningCode: String?
+      switch action {
+      case .queryResetCredits(let accountID):
+        let result = try await client.refreshOpenAIQuota(accountID: accountID)
+        openAIQuotaByAccountID[accountID] = result.usage
+        openAIQuotaErrorByAccountID[accountID] = nil
+      case .resetOpenAIQuota(let accountID):
+        let result = try await client.resetOpenAIQuota(accountID: accountID)
+        if result.cacheRefreshed, let quota = result.quota {
+          openAIQuotaByAccountID[accountID] = quota
+        } else {
+          openAIQuotaByAccountID[accountID] = nil
+        }
+        openAIQuotaErrorByAccountID[accountID] = nil
+        resetWarningCode = result.warningCode
+      }
+      await refresh()
+      if let resetWarningCode {
+        accountActionError = openAIResetWarningMessage(resetWarningCode)
+      }
+    } catch is CancellationError {
+      return
+    } catch {
+      openAIQuotaErrorByAccountID[action.accountID] = error.localizedDescription
+      accountActionError = "账号操作失败：\(error.localizedDescription)"
+    }
+  }
+
+  private func openAIResetWarningMessage(_ code: String) -> String {
+    switch code {
+    case "reset_credit_cache_refresh_failed":
+      return "重置已执行，但重置次数缓存刷新失败，请重新查询。"
+    case "account_state_recovery_failed":
+      return "重置已执行，但账号状态恢复失败，请检查账号状态。"
+    case "account_state_refresh_failed":
+      return "重置已执行，但账号状态刷新失败，请稍后刷新。"
+    default:
+      return "重置已执行，但服务器返回了部分同步警告：\(code)"
+    }
   }
 }

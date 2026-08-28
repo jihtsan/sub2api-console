@@ -163,6 +163,334 @@ public struct AdminDashboardStats: Decodable, Sendable, Equatable {
   }
 }
 
+public struct AdminAccount: Decodable, Sendable, Equatable, Identifiable {
+  public let id: Int64
+  public let name: String
+  public let platform: String
+  public let type: String
+  public let status: String?
+  public let errorMessage: String?
+  public let schedulable: Bool?
+  public let rateLimitedAt: String?
+  public let rateLimitResetAt: String?
+  public let overloadUntil: String?
+  public let tempUnschedulableUntil: String?
+  public let tempUnschedulableReason: String?
+  public let sessionWindowStatus: String?
+  public let extra: AdminAccountExtra?
+  public let currentConcurrency: Int?
+  public let updatedAt: String?
+  public let quotaWeeklyLimit: Double?
+  public let quotaWeeklyUsed: Double?
+  public let quotaWeeklyResetAt: String?
+  public let parentAccountID: Int64?
+  public let quotaDimension: String?
+
+  public var isRateLimited: Bool {
+    hasValue(rateLimitedAt) || hasValue(rateLimitResetAt)
+      || status?.lowercased() == "rate_limited"
+      || status?.lowercased() == "ratelimited"
+  }
+
+  public var isOverloaded: Bool {
+    hasValue(overloadUntil) || status?.lowercased() == "overloaded"
+  }
+
+  public var isTemporarilyUnschedulable: Bool {
+    hasValue(tempUnschedulableUntil) || hasValue(tempUnschedulableReason)
+  }
+
+  public var isOpenAIOAuth: Bool {
+    platform.lowercased() == "openai" && type.lowercased() == "oauth"
+  }
+
+  public var isShadow: Bool {
+    parentAccountID != nil || quotaDimension?.lowercased() == "spark"
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case id, name, platform, type, status, schedulable, extra
+    case parentAccountID = "parent_account_id"
+    case quotaDimension = "quota_dimension"
+    case quotaWeeklyLimit = "quota_weekly_limit"
+    case quotaWeeklyUsed = "quota_weekly_used"
+    case quotaWeeklyResetAt = "quota_weekly_reset_at"
+    case errorMessage = "error_message"
+    case rateLimitedAt = "rate_limited_at"
+    case rateLimitResetAt = "rate_limit_reset_at"
+    case overloadUntil = "overload_until"
+    case tempUnschedulableUntil = "temp_unschedulable_until"
+    case tempUnschedulableReason = "temp_unschedulable_reason"
+    case sessionWindowStatus = "session_window_status"
+    case currentConcurrency = "current_concurrency"
+    case updatedAt = "updated_at"
+  }
+
+  private func hasValue(_ value: String?) -> Bool {
+    guard let value else { return false }
+    return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+}
+
+public struct AdminAccountExtra: Decodable, Sendable, Equatable {
+  public let codex5hUsedPercent: Double?
+  public let codex5hResetAfterSeconds: Double?
+  public let codex5hResetAt: String?
+  public let codex7dUsedPercent: Double?
+  public let codex7dResetAfterSeconds: Double?
+  public let codex7dResetAt: String?
+  public let codexUsageUpdatedAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case codex5hUsedPercent = "codex_5h_used_percent"
+    case codex5hResetAfterSeconds = "codex_5h_reset_after_seconds"
+    case codex5hResetAt = "codex_5h_reset_at"
+    case codex7dUsedPercent = "codex_7d_used_percent"
+    case codex7dResetAfterSeconds = "codex_7d_reset_after_seconds"
+    case codex7dResetAt = "codex_7d_reset_at"
+    case codexUsageUpdatedAt = "codex_usage_updated_at"
+  }
+}
+
+public struct AdminAccountUsageProgress: Decodable, Sendable, Equatable {
+  public let utilization: Double?
+  public let resetsAt: String?
+  public let remainingSeconds: Double?
+
+  enum CodingKeys: String, CodingKey {
+    case utilization
+    case resetsAt = "resets_at"
+    case remainingSeconds = "remaining_seconds"
+  }
+}
+
+public struct AdminAccountUsageInfo: Decodable, Sendable, Equatable {
+  public let updatedAt: String?
+  public let sevenDay: AdminAccountUsageProgress?
+  public let errorCode: String?
+  public let error: String?
+
+  enum CodingKeys: String, CodingKey {
+    case sevenDay = "seven_day"
+    case updatedAt = "updated_at"
+    case errorCode = "error_code"
+    case error
+  }
+}
+
+public struct AdminAccountPage: Decodable, Sendable, Equatable {
+  public let items: [AdminAccount]
+  public let total: Int
+  public let page: Int
+  public let pageSize: Int
+  public let pages: Int
+
+  enum CodingKeys: String, CodingKey {
+    case items, total, page, pages
+    case pageSize = "page_size"
+  }
+}
+
+public struct AdminAccountUsageBatchResponse: Decodable, Sendable, Equatable {
+  public let usage: [String: AdminAccountUsageInfo]
+  public let errors: [String: String]
+}
+
+public struct OpenAIRateLimitWindow: Decodable, Sendable, Equatable {
+  public let usedPercent: Double
+  public let limitWindowSeconds: Double
+  public let resetAfterSeconds: Double
+  public let resetAt: Double
+
+  enum CodingKeys: String, CodingKey {
+    case usedPercent = "used_percent"
+    case limitWindowSeconds = "limit_window_seconds"
+    case resetAfterSeconds = "reset_after_seconds"
+    case resetAt = "reset_at"
+  }
+}
+
+public struct OpenAIRateLimit: Decodable, Sendable, Equatable {
+  public let allowed: Bool
+  public let limitReached: Bool
+  public let primaryWindow: OpenAIRateLimitWindow?
+  public let secondaryWindow: OpenAIRateLimitWindow?
+
+  enum CodingKeys: String, CodingKey {
+    case allowed
+    case limitReached = "limit_reached"
+    case primaryWindow = "primary_window"
+    case secondaryWindow = "secondary_window"
+  }
+}
+
+public struct OpenAIAdditionalRateLimit: Decodable, Sendable, Equatable {
+  public let limitName: String
+  public let meteredFeature: String
+  public let rateLimit: OpenAIRateLimit?
+
+  enum CodingKeys: String, CodingKey {
+    case limitName = "limit_name"
+    case meteredFeature = "metered_feature"
+    case rateLimit = "rate_limit"
+  }
+}
+
+public struct OpenAIRateLimitResetCreditDetail: Decodable, Sendable, Equatable {
+  public let expiresAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case expiresAt = "expires_at"
+  }
+}
+
+public struct OpenAIRateLimitResetCredits: Decodable, Sendable, Equatable {
+  public let availableCount: Int
+  public let credits: [OpenAIRateLimitResetCreditDetail]?
+
+  enum CodingKeys: String, CodingKey {
+    case availableCount = "available_count"
+    case credits
+  }
+}
+
+public struct OpenAIQuotaUsage: Decodable, Sendable, Equatable {
+  public let userID: String?
+  public let accountID: String?
+  public let email: String?
+  public let planType: String?
+  public let rateLimit: OpenAIRateLimit?
+  public let additionalRateLimits: [OpenAIAdditionalRateLimit]?
+  public let rateLimitResetCredits: OpenAIRateLimitResetCredits?
+  public let fetchedAt: Double
+
+  public var availableResetCount: Int {
+    max(0, rateLimitResetCredits?.availableCount ?? 0)
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case userID = "user_id"
+    case accountID = "account_id"
+    case email
+    case planType = "plan_type"
+    case rateLimit = "rate_limit"
+    case additionalRateLimits = "additional_rate_limits"
+    case rateLimitResetCredits = "rate_limit_reset_credits"
+    case fetchedAt = "fetched_at"
+  }
+}
+
+public struct OpenAIQuotaRefreshResult: Decodable, Sendable, Equatable {
+  public let userID: String?
+  public let accountID: String?
+  public let email: String?
+  public let planType: String?
+  public let rateLimit: OpenAIRateLimit?
+  public let additionalRateLimits: [OpenAIAdditionalRateLimit]?
+  public let rateLimitResetCredits: OpenAIRateLimitResetCredits?
+  public let fetchedAt: Double
+  public let cachePersisted: Bool
+
+  public var usage: OpenAIQuotaUsage {
+    OpenAIQuotaUsage(
+      userID: userID,
+      accountID: accountID,
+      email: email,
+      planType: planType,
+      rateLimit: rateLimit,
+      additionalRateLimits: additionalRateLimits,
+      rateLimitResetCredits: rateLimitResetCredits,
+      fetchedAt: fetchedAt
+    )
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case userID = "user_id"
+    case accountID = "account_id"
+    case email
+    case planType = "plan_type"
+    case rateLimit = "rate_limit"
+    case additionalRateLimits = "additional_rate_limits"
+    case rateLimitResetCredits = "rate_limit_reset_credits"
+    case fetchedAt = "fetched_at"
+    case cachePersisted = "cache_persisted"
+  }
+}
+
+public struct OpenAIQuotaResetCredit: Decodable, Sendable, Equatable {
+  public let id: String?
+  public let resetType: String?
+  public let status: String?
+  public let grantedAt: String?
+  public let expiresAt: String?
+  public let redeemStartedAt: String?
+  public let redeemedAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case id
+    case resetType = "reset_type"
+    case status
+    case grantedAt = "granted_at"
+    case expiresAt = "expires_at"
+    case redeemStartedAt = "redeem_started_at"
+    case redeemedAt = "redeemed_at"
+  }
+}
+
+public struct OpenAIQuotaResetResult: Decodable, Sendable, Equatable {
+  public let code: String
+  public let credit: OpenAIQuotaResetCredit?
+  public let windowsReset: Int
+  public let quota: OpenAIQuotaUsage?
+  public let account: AdminAccount?
+  public let cacheRefreshed: Bool
+  public let accountStateRecovered: Bool
+  public let warningCode: String?
+
+  enum CodingKeys: String, CodingKey {
+    case code, credit
+    case windowsReset = "windows_reset"
+    case quota, account
+    case cacheRefreshed = "cache_refreshed"
+    case accountStateRecovered = "account_state_recovered"
+    case warningCode = "warning_code"
+  }
+}
+
+public struct AdminAccountSnapshot: Sendable, Equatable, Identifiable {
+  public let account: AdminAccount
+  public let usage: AdminAccountUsageInfo?
+  public let usageError: String?
+
+  public var id: Int64 { account.id }
+
+  public var sevenDayUsagePercent: Double? {
+    if let utilization = usage?.sevenDay?.utilization ?? account.extra?.codex7dUsedPercent {
+      return utilization
+    }
+    guard let limit = account.quotaWeeklyLimit, limit > 0 else { return nil }
+    return (account.quotaWeeklyUsed ?? 0) / limit * 100
+  }
+
+  public var sevenDayResetAt: String? {
+    usage?.sevenDay?.resetsAt ?? account.extra?.codex7dResetAt ?? account.quotaWeeklyResetAt
+  }
+
+  public var sevenDayRemainingSeconds: Double? {
+    usage?.sevenDay?.remainingSeconds ?? account.extra?.codex7dResetAfterSeconds
+  }
+
+  public init(
+    account: AdminAccount,
+    usage: AdminAccountUsageInfo? = nil,
+    usageError: String? = nil
+  ) {
+    self.account = account
+    self.usage = usage
+    self.usageError = usageError
+  }
+}
+
 public struct APIKeyUsage: Decodable, Sendable, Equatable {
   public let mode: String?
   public let isValid: Bool?
@@ -317,17 +645,20 @@ public struct APIKeyMonitorSnapshot: Sendable, Equatable {
 
 public struct AdminAPIKeyMonitorSnapshot: Sendable, Equatable {
   public let stats: AdminDashboardStats
+  public let adminAccounts: [AdminAccountSnapshot]
   public let publicSettings: PublicSettings?
   public let warning: String?
   public let fetchedAt: Date
 
   public init(
     stats: AdminDashboardStats,
+    adminAccounts: [AdminAccountSnapshot] = [],
     publicSettings: PublicSettings?,
     warning: String?,
     fetchedAt: Date = Date()
   ) {
     self.stats = stats
+    self.adminAccounts = adminAccounts
     self.publicSettings = publicSettings
     self.warning = warning
     self.fetchedAt = fetchedAt
@@ -338,6 +669,7 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
   public let user: UserProfile
   public let userStats: UserDashboardStats
   public let adminStats: AdminDashboardStats?
+  public let adminAccounts: [AdminAccountSnapshot]
   public let publicSettings: PublicSettings?
   public let warning: String?
   public let fetchedAt: Date
@@ -346,6 +678,7 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
     user: UserProfile,
     userStats: UserDashboardStats,
     adminStats: AdminDashboardStats?,
+    adminAccounts: [AdminAccountSnapshot] = [],
     publicSettings: PublicSettings?,
     warning: String?,
     fetchedAt: Date = Date()
@@ -353,6 +686,7 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
     self.user = user
     self.userStats = userStats
     self.adminStats = adminStats
+    self.adminAccounts = adminAccounts
     self.publicSettings = publicSettings
     self.warning = warning
     self.fetchedAt = fetchedAt
@@ -470,6 +804,22 @@ public enum MonitorSnapshot: Sendable, Equatable {
     case .adminAPIKey(let snapshot): snapshot.stats
     case .account(let snapshot): snapshot.adminStats
     case .apiKey: nil
+    }
+  }
+
+  public var adminAccounts: [AdminAccountSnapshot] {
+    switch self {
+    case .adminAPIKey(let snapshot): snapshot.adminAccounts
+    case .account(let snapshot): snapshot.adminAccounts
+    case .apiKey: []
+    }
+  }
+
+  public var supportsAdminAccountList: Bool {
+    switch self {
+    case .adminAPIKey: true
+    case .account(let snapshot): snapshot.user.isAdmin
+    case .apiKey: false
     }
   }
 
