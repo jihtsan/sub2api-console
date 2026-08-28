@@ -129,7 +129,7 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
       session: makeStubSession()
     )
     let result = try await client.login(
-      email: "operator@example.com",
+      email: "  operator@example.com \n",
       password: "secret-password"
     )
 
@@ -144,6 +144,10 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
     XCTAssertNil(try credentials.loadAPIKey())
 
     XCTAssertEqual(requests.request(path: "/api/v1/auth/login")?.httpMethod, "POST")
+    XCTAssertEqual(
+      requests.jsonBody(path: "/api/v1/auth/login")?["email"] as? String,
+      "operator@example.com"
+    )
   }
 
   func testRefreshesUnauthorizedSessionRotatesRefreshTokenAndRetries() async throws {
@@ -439,19 +443,25 @@ private final class InMemoryCredentialStore: CredentialStoring, @unchecked Senda
 }
 
 private final class RequestLog: @unchecked Sendable {
+  private struct CapturedRequest {
+    let request: URLRequest
+    let body: Data?
+  }
+
   private let lock = NSLock()
-  private var requests: [URLRequest] = []
+  private var requests: [CapturedRequest] = []
 
   var paths: [String] {
-    lock.withLock { requests.compactMap(\.url?.path) }
+    lock.withLock { requests.compactMap(\.request.url?.path) }
   }
 
   func append(_ request: URLRequest) {
-    lock.withLock { requests.append(request) }
+    let captured = CapturedRequest(request: request, body: Self.readBody(from: request))
+    lock.withLock { requests.append(captured) }
   }
 
   func request(path: String) -> URLRequest? {
-    lock.withLock { requests.first { $0.url?.path == path } }
+    lock.withLock { requests.first { $0.request.url?.path == path }?.request }
   }
 
   func queryValue(named name: String, path: String) -> String? {
@@ -459,5 +469,32 @@ private final class RequestLog: @unchecked Sendable {
     return URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first {
       $0.name == name
     }?.value
+  }
+
+  func jsonBody(path: String) -> [String: Any]? {
+    let body = lock.withLock {
+      requests.first { $0.request.url?.path == path }?.body
+    }
+    guard let body else { return nil }
+    return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+  }
+
+  private static func readBody(from request: URLRequest) -> Data? {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return nil }
+
+    stream.open()
+    defer { stream.close() }
+
+    var body = Data()
+    var buffer = [UInt8](repeating: 0, count: 4_096)
+    while true {
+      let count = buffer.withUnsafeMutableBufferPointer { pointer in
+        stream.read(pointer.baseAddress!, maxLength: pointer.count)
+      }
+      guard count >= 0 else { return nil }
+      guard count > 0 else { return body }
+      body.append(contentsOf: buffer.prefix(count))
+    }
   }
 }

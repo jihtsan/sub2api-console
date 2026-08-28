@@ -56,6 +56,11 @@ public actor Sub2APIClient {
       let password: String
     }
 
+    let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedEmail.isEmpty, !password.isEmpty else {
+      throw Sub2APIError.missingCredentials
+    }
+
     if let settings = try? await fetchPublicSettings() {
       try validateAccountLoginVersion(settings.version)
       if settings.turnstileEnabled == true || settings.tencentCaptchaEnabled == true {
@@ -66,7 +71,7 @@ public actor Sub2APIClient {
     let payload: AuthPayload = try await panelRequest(
       path: "auth/login",
       method: "POST",
-      body: encoder.encode(LoginRequest(email: email, password: password)),
+      body: encoder.encode(LoginRequest(email: normalizedEmail, password: password)),
       accessToken: nil
     )
     return try persistAuthentication(payload)
