@@ -83,7 +83,7 @@ final class ModelDecodingTests: XCTestCase {
               "status": "active",
               "schedulable": false,
               "rate_limited_at": "2026-08-28T10:00:00Z",
-              "rate_limit_reset_at": "2026-08-28T16:00:00Z",
+              "rate_limit_reset_at": "2099-08-28T16:00:00Z",
               "extra": {
                 "codex_7d_used_percent": 72.5,
                 "codex_7d_reset_after_seconds": 86400,
@@ -114,6 +114,28 @@ final class ModelDecodingTests: XCTestCase {
     XCTAssertEqual(snapshot.sevenDayUsagePercent, 72.5)
     XCTAssertEqual(snapshot.sevenDayRemainingSeconds, 86_400)
     XCTAssertEqual(snapshot.sevenDayResetAt, "2026-08-29T10:00:00Z")
+  }
+
+  func testIgnoresExpiredRateLimitFieldsForActiveAccount() throws {
+    let json = Data(
+      """
+      {
+        "id": 43,
+        "name": "recovered-openai",
+        "platform": "openai",
+        "type": "oauth",
+        "status": "active",
+        "schedulable": true,
+        "rate_limited_at": "2026-08-21T08:43:59+08:00",
+        "rate_limit_reset_at": "2026-08-21T12:02:09+08:00"
+      }
+      """.utf8
+    )
+
+    let account = try JSONDecoder().decode(AdminAccount.self, from: json)
+
+    XCTAssertFalse(account.isRateLimited)
+    XCTAssertNotNil(account.rateLimitResetDate)
   }
 
   func testUsesGenericSevenDayUsageWhenCodexSnapshotIsMissing() throws {

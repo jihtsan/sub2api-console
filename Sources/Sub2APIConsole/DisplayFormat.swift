@@ -90,4 +90,16 @@ enum DisplayFormat {
     let fractionLength = clamped >= 10 ? 0 : 1
     return "\(clamped.formatted(.number.precision(.fractionLength(fractionLength))))%"
   }
+
+  static func localDateTime(_ date: Date) -> String {
+    date.formatted(
+      Date.FormatStyle(
+        date: .numeric,
+        time: .standard,
+        locale: .current,
+        calendar: .current,
+        timeZone: .current
+      )
+    )
+  }
 }
