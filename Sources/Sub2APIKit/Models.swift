@@ -186,10 +186,17 @@ public struct AdminAccount: Decodable, Sendable, Equatable, Identifiable {
   public let parentAccountID: Int64?
   public let quotaDimension: String?
 
+  public var rateLimitResetDate: Date? {
+    parseISO8601Date(rateLimitResetAt)
+  }
+
   public var isRateLimited: Bool {
-    hasValue(rateLimitedAt) || hasValue(rateLimitResetAt)
-      || status?.lowercased() == "rate_limited"
-      || status?.lowercased() == "ratelimited"
+    switch status?.lowercased() {
+    case "rate_limited", "ratelimited":
+      return true
+    default:
+      return rateLimitResetDate.map { $0 > Date() } ?? false
+    }
   }
 
   public var isOverloaded: Bool {
@@ -229,6 +236,17 @@ public struct AdminAccount: Decodable, Sendable, Equatable, Identifiable {
   private func hasValue(_ value: String?) -> Bool {
     guard let value else { return false }
     return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private func parseISO8601Date(_ rawValue: String?) -> Date? {
+    guard let rawValue, !rawValue.isEmpty else { return nil }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.date(from: rawValue)
+      ?? {
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: rawValue)
+      }()
   }
 }
 
