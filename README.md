@@ -11,6 +11,7 @@
 - 菜单栏实时显示余额、今日消费、RPM 或账户健康
 - 查看今日请求、Token、RPM/TPM、平均延迟
 - 管理员可查看用户活跃度与上游账户异常、限流、过载状态
+- 管理员可在菜单栏查看账号名、7D 用量，并为 OpenAI OAuth 账号查询重置次数和执行确认后的重置
 - 支持账户登录、低权限普通 API Key 和全局管理员 API Key
 - 支持 TOTP 两步验证与 refresh token 自动轮转
 - 凭据存入 macOS Keychain，密码永不落盘
@@ -48,7 +49,7 @@ swift run Sub2APIConsole
 | --- | --- | --- | --- |
 | 账户 | 邮箱、密码，可选 TOTP | 用户 Dashboard；管理员可见系统指标 | 自动 |
 | 普通 API Key | `sk-...` | 当前 Key 的余额、额度和用量 | Key 有效期内持续可用 |
-| 管理员 API Key | `admin-...` | 全局用量、活跃用户和上游账户健康 | Key 有效期内持续可用 |
+| 管理员 API Key | `admin-...` | 全局用量、活跃用户、上游账号列表与健康状态；可操作 OpenAI OAuth 额度重置 | Key 有效期内持续可用 |
 
 服务器地址可以填写站点根地址或 `/api/v1` 地址，客户端会自动规范化。设置页无需选择普通或管理员 API Key，客户端会根据 `sk-` 或 `admin-` 前缀自动识别。普通 API Key 是推荐的最低权限模式；管理员 API Key 拥有完整管理员权限，只应在确实需要全局监控时使用。启用了登录 CAPTCHA 的实例无法直接完成原生账户登录，请使用其中一种 API Key 模式。
 
@@ -59,7 +60,10 @@ swift run Sub2APIConsole
 - `POST /api/v1/auth/refresh`
 - `GET /api/v1/auth/me`
 - `GET /api/v1/usage/dashboard/stats`
-- `GET /api/v1/admin/dashboard/stats`（管理员账户或管理员 API Key；客户端仅执行只读请求）
+- `GET /api/v1/admin/dashboard/stats`（管理员账户或管理员 API Key）
+- `GET /api/v1/admin/accounts`、`POST /api/v1/admin/accounts/usage/batch`（管理员账号列表与 7D 用量同步）
+- `POST /api/v1/admin/openai/accounts/:id/quota/refresh`（查询 OpenAI/Codex 可用重置次数）
+- `POST /api/v1/admin/openai/accounts/:id/reset-quota`（确认后消耗一次上游重置次数）
 - `GET /v1/usage`（API Key 模式）
 
 接口调研和版本注意事项见 [docs/sub2api-api-research.md](docs/sub2api-api-research.md)。
@@ -67,7 +71,7 @@ swift run Sub2APIConsole
 ## 安全
 
 - Access Token、Refresh Token、普通 API Key 和管理员 API Key 只存储在 macOS Keychain。
-- 管理员 API Key 是全局高权限凭据；应用不会使用它调用写入接口。
+- 管理员 API Key 是全局高权限凭据；应用仅在用户确认 OpenAI/Codex 额度重置时调用对应写入接口。
 - 账户密码仅用于当次登录请求，不写入磁盘。
 - 除本机开发环境外，请始终使用 HTTPS。
 - 应用包为兼容用户显式开启的远程 HTTP 声明了 ATS 例外，但应用层默认仍拒绝远程 HTTP；只有打开“允许不安全 HTTP”后才会放行。

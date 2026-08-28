@@ -67,12 +67,18 @@ struct MenuBarView: View {
           .padding(12)
       }
 
+      if let actionError = store.accountActionError {
+        Divider()
+        StatusMessage(message: actionError, color: .red)
+          .padding(12)
+      }
+
       Divider()
       footer
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
     }
-    .frame(width: 348)
+    .frame(width: 390)
     .onAppear { store.setMenuPresented(true) }
     .onDisappear { store.setMenuPresented(false) }
   }
@@ -162,6 +168,11 @@ struct MenuBarView: View {
       if let admin = snapshot.adminStats {
         Divider()
         adminSummary(admin)
+      }
+
+      if snapshot.supportsAdminAccountList {
+        Divider()
+        adminAccountList(snapshot.adminAccounts)
       }
 
       HStack(spacing: 4) {
@@ -335,6 +346,40 @@ struct MenuBarView: View {
     }
   }
 
+  private func adminAccountList(_ accounts: [AdminAccountSnapshot]) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Label("账号列表", systemImage: "person.3")
+          .font(.caption.weight(.semibold))
+        Spacer()
+        Text("\(accounts.count) 个")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .monospacedDigit()
+      }
+
+      if accounts.isEmpty {
+        Text("暂无账号数据")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.vertical, 10)
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 0) {
+            ForEach(accounts) { account in
+              AdminAccountRow(account: account, store: store)
+              if account.id != accounts.last?.id {
+                Divider()
+              }
+            }
+          }
+        }
+        .frame(maxHeight: 360)
+      }
+    }
+  }
+
   private var emptyState: some View {
     VStack(spacing: 10) {
       if store.state == .connecting {
@@ -408,6 +453,275 @@ struct MenuBarView: View {
     case .connecting: .orange
     case .connected: store.isHealthy ? .green : .orange
     case .failed: .red
+    }
+  }
+}
+
+private struct AdminAccountRow: View {
+  let account: AdminAccountSnapshot
+  @ObservedObject var store: MonitorStore
+  @State private var isResetConfirmationPresented = false
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 7) {
+      HStack(alignment: .top, spacing: 8) {
+        Circle()
+          .fill(status.color)
+          .frame(width: 8, height: 8)
+          .padding(.top, 4)
+
+        VStack(alignment: .leading, spacing: 2) {
+          Text(account.account.name)
+            .font(.caption.weight(.semibold))
+            .lineLimit(1)
+          Text("\(platformName) · \(status.title)")
+            .font(.caption2)
+            .foregroundStyle(status.color)
+            .lineLimit(1)
+            .help(account.account.errorMessage ?? "")
+        }
+
+        Spacer(minLength: 8)
+
+        if let percent = account.sevenDayUsagePercent {
+          Text(DisplayFormat.percentageText(percent))
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(percent >= 100 ? Color.orange : Color.primary)
+        }
+      }
+
+      sevenDayUsage
+
+      if let statusDetail {
+        Label(statusDetail, systemImage: "clock")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+
+      if account.account.isOpenAIOAuth && !account.account.isShadow {
+        HStack(spacing: 6) {
+          Button {
+            Task { await store.refreshOpenAIQuota(account.id) }
+          } label: {
+            Label(resetCreditsTitle, systemImage: "arrow.clockwise.circle")
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .help("查询上游可用重置次数")
+
+          Button {
+            isResetConfirmationPresented = true
+          } label: {
+            Label("重置", systemImage: "arrow.uturn.backward.circle")
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .help("消耗一次上游重置次数")
+          .disabled(availableResetCount == 0)
+
+          if store.isAccountActionInProgress(account.id) {
+            ProgressView()
+              .controlSize(.small)
+              .padding(.leading, 2)
+          }
+
+          Spacer(minLength: 0)
+        }
+        .disabled(store.isAccountActionInProgress(account.id))
+
+        if let quotaError = store.openAIQuotaError(for: account.id) {
+          Text("重置次数查询失败：\(quotaError)")
+            .font(.caption2)
+            .foregroundStyle(.red)
+            .lineLimit(2)
+        }
+      } else if account.account.isShadow {
+        Label("影子账号跟随母账号额度", systemImage: "arrow.triangle.branch")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
+      }
+    }
+    .padding(.vertical, 9)
+    .confirmationDialog(
+      "确认重置 OpenAI 账号？",
+      isPresented: $isResetConfirmationPresented,
+      titleVisibility: .visible
+    ) {
+      Button("重置", role: .destructive) {
+        Task { await store.resetOpenAIQuota(account.id) }
+      }
+      Button("取消", role: .cancel) {}
+    } message: {
+      Text("将消耗“\(account.account.name)”的一个上游重置次数，并同步账号状态。")
+    }
+  }
+
+  private var availableResetCount: Int {
+    store.openAIQuota(for: account.id)?.availableResetCount ?? 0
+  }
+
+  private var resetCreditsTitle: String {
+    guard store.openAIQuota(for: account.id) != nil else { return "重置次数" }
+    return "重置次数 \(availableResetCount)"
+  }
+
+  @ViewBuilder
+  private var sevenDayUsage: some View {
+    if let percent = account.sevenDayUsagePercent {
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 5) {
+          Label("7D 限额", systemImage: "chart.bar.xaxis")
+          Spacer()
+          resetDescription
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+
+        ProgressView(value: min(max(percent / 100, 0), 1))
+          .tint(percent >= 100 ? .orange : .accentColor)
+      }
+    } else {
+      Text(account.usageError == nil ? "7D 限额暂无数据" : "7D 限额同步失败")
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+        .help(account.usageError ?? "服务器尚未返回 7D 用量")
+    }
+  }
+
+  @ViewBuilder
+  private var resetDescription: some View {
+    if let date = parseDate(account.sevenDayResetAt) {
+      Text("重置于 \(date, style: .relative)")
+    } else if let seconds = account.sevenDayRemainingSeconds, seconds >= 0 {
+      Text("约 \(durationText(seconds)) 后重置")
+    }
+  }
+
+  private var status: AdminAccountStatus {
+    let value = account.account
+    if value.isRateLimited || liveOpenAIRateLimitReached { return .rateLimited }
+    if value.isOverloaded { return .overloaded }
+    if value.isTemporarilyUnschedulable { return .paused }
+    if value.status?.lowercased() == "error"
+      || !(value.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    {
+      return .error
+    }
+    if ["inactive", "disabled", "expired"].contains(value.status?.lowercased()) {
+      return .inactive
+    }
+    if value.schedulable == false { return .paused }
+    return .normal
+  }
+
+  private var statusDetail: String? {
+    switch status {
+    case .rateLimited:
+      if let date = parseDate(account.account.rateLimitResetAt) {
+        return "限流预计 \(relativeDateText(date))恢复"
+      }
+      if let date = liveOpenAIRateLimitResetDate {
+        return "限流预计 \(relativeDateText(date))恢复"
+      }
+      return "等待上游限流窗口恢复"
+    case .overloaded:
+      if let date = parseDate(account.account.overloadUntil) {
+        return "过载预计 \(relativeDateText(date))恢复"
+      }
+      return "等待过载状态恢复"
+    case .error:
+      return account.account.errorMessage
+    case .paused:
+      return account.account.tempUnschedulableReason ?? "账号暂不可调度"
+    case .normal:
+      return nil
+    case .inactive:
+      return "账号已停用"
+    }
+  }
+
+  private var liveOpenAIRateLimitReached: Bool {
+    guard let rateLimit = store.openAIQuota(for: account.id)?.rateLimit else { return false }
+    return rateLimit.limitReached || !rateLimit.allowed
+  }
+
+  private var liveOpenAIRateLimitResetDate: Date? {
+    guard let timestamp = store.openAIQuota(for: account.id)?.rateLimit?.primaryWindow?.resetAt,
+      timestamp > 0
+    else { return nil }
+    return Date(timeIntervalSince1970: timestamp)
+  }
+
+  private var platformName: String {
+    switch account.account.platform.lowercased() {
+    case "anthropic": "Anthropic"
+    case "openai": "OpenAI"
+    case "gemini": "Gemini"
+    case "antigravity": "Antigravity"
+    case "grok": "Grok"
+    case "kimi": "Kimi"
+    case "zhipu": "智谱"
+    case "deepseek": "DeepSeek"
+    default: account.account.platform
+    }
+  }
+
+  private func parseDate(_ rawValue: String?) -> Date? {
+    guard let rawValue, !rawValue.isEmpty else { return nil }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.date(from: rawValue)
+      ?? {
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: rawValue)
+      }()
+  }
+
+  private func durationText(_ seconds: Double) -> String {
+    let totalSeconds = max(Int(seconds.rounded()), 0)
+    let days = totalSeconds / 86_400
+    let hours = (totalSeconds % 86_400) / 3_600
+    let minutes = (totalSeconds % 3_600) / 60
+    if days > 0 { return "\(days)天\(hours)小时" }
+    if hours > 0 { return "\(hours)小时\(minutes)分钟" }
+    return "\(max(minutes, 1))分钟"
+  }
+
+  private func relativeDateText(_ date: Date) -> String {
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: date, relativeTo: Date())
+  }
+}
+
+private enum AdminAccountStatus {
+  case normal
+  case rateLimited
+  case overloaded
+  case paused
+  case error
+  case inactive
+
+  var title: String {
+    switch self {
+    case .normal: "正常"
+    case .rateLimited: "限流中"
+    case .overloaded: "过载"
+    case .paused: "已暂停"
+    case .error: "错误"
+    case .inactive: "已停用"
+    }
+  }
+
+  var color: Color {
+    switch self {
+    case .normal: .green
+    case .rateLimited: .orange
+    case .overloaded: .yellow
+    case .paused: .secondary
+    case .error: .red
+    case .inactive: .secondary
     }
   }
 }
