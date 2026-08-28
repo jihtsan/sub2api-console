@@ -366,7 +366,7 @@ struct MenuBarView: View {
           .padding(.vertical, 10)
       } else {
         ScrollView {
-          LazyVStack(spacing: 0) {
+          VStack(spacing: 0) {
             ForEach(accounts) { account in
               AdminAccountRow(account: account, store: store)
               if account.id != accounts.last?.id {
@@ -374,10 +374,18 @@ struct MenuBarView: View {
               }
             }
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxHeight: 360)
+        // A menu-bar popover gives an unconstrained vertical proposal. The
+        // explicit viewport keeps a populated list from collapsing to zero.
+        .frame(height: accountListViewportHeight(for: accounts.count))
       }
     }
+  }
+
+  private func accountListViewportHeight(for count: Int) -> CGFloat {
+    let estimatedContentHeight = CGFloat(max(count, 1)) * 170
+    return min(max(estimatedContentHeight, 170), 360)
   }
 
   private var emptyState: some View {
