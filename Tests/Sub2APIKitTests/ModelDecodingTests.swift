@@ -66,4 +66,74 @@ final class ModelDecodingTests: XCTestCase {
 
     XCTAssertEqual(stats.unhealthyAccounts, 6)
   }
+
+  func testDecodesQuotaLimitedAPIKeyUsageWithoutTrustingIsValidAlone() throws {
+    let json = Data(
+      """
+      {
+        "mode": "quota_limited",
+        "isValid": true,
+        "status": "quota_exhausted",
+        "quota": {
+          "limit": 20,
+          "used": 20,
+          "remaining": 0,
+          "unit": "USD"
+        },
+        "rate_limits": [
+          {
+            "window": "5h",
+            "limit": 5,
+            "used": 4.25,
+            "remaining": 0.75,
+            "reset_at": "2026-08-28T12:00:00Z"
+          }
+        ],
+        "usage": {
+          "today": {
+            "requests": 18,
+            "total_tokens": 24000,
+            "actual_cost": 2.4
+          },
+          "rpm": 1.5,
+          "tpm": 900
+        }
+      }
+      """.utf8
+    )
+
+    let usage = try JSONDecoder().decode(APIKeyUsage.self, from: json)
+
+    XCTAssertEqual(usage.effectiveRemaining, 0)
+    XCTAssertEqual(usage.rateLimits?.first?.window, "5h")
+    XCTAssertEqual(usage.usage?.today?.totalTokens, 24_000)
+    XCTAssertFalse(usage.isOperational)
+  }
+
+  func testDecodesUnrestrictedSubscriptionWithMissingBestEffortUsage() throws {
+    let json = Data(
+      """
+      {
+        "mode": "unrestricted",
+        "isValid": true,
+        "planName": "Weekly",
+        "remaining": 7.5,
+        "unit": "USD",
+        "subscription": {
+          "weekly_usage_usd": 2.5,
+          "weekly_limit_usd": 10,
+          "expires_at": "2026-09-01T00:00:00Z"
+        },
+        "future_field": {"ignored": true}
+      }
+      """.utf8
+    )
+
+    let usage = try JSONDecoder().decode(APIKeyUsage.self, from: json)
+
+    XCTAssertEqual(usage.planName, "Weekly")
+    XCTAssertEqual(usage.subscription?.weeklyLimitUSD, 10)
+    XCTAssertNil(usage.usage)
+    XCTAssertTrue(usage.isOperational)
+  }
 }

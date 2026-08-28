@@ -11,7 +11,8 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
 
   func testConnectsAPIKeyUsingRawGatewayUsageResponseAndReverseProxyPath() async throws {
     let credentials = InMemoryCredentialStore(
-      session: StoredSession(accessToken: "old-panel-token")
+      session: StoredSession(accessToken: "old-panel-token"),
+      adminAPIKey: "old-admin-key"
     )
     let requests = RequestLog()
 
@@ -24,7 +25,7 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
           for: request,
           body: """
             {
-              "mode": "wallet",
+              "mode": "unrestricted",
               "isValid": true,
               "planName": "Wallet",
               "remaining": 23.75,
@@ -72,6 +73,7 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(snapshot.publicSettings?.siteName, "Example Sub2API")
     XCTAssertEqual(try credentials.loadAPIKey(), "sk-sub2api")
     XCTAssertNil(try credentials.loadSession())
+    XCTAssertNil(try credentials.loadAdminAPIKey())
     XCTAssertEqual(
       requests.request(path: "/proxy/v1/usage")?.value(forHTTPHeaderField: "Authorization"),
       "Bearer sk-sub2api"
@@ -84,8 +86,138 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
     )
   }
 
+  func testConnectsAdminAPIKeyWithDedicatedHeaderAndClearsOtherCredentials() async throws {
+    let credentials = InMemoryCredentialStore(
+      session: StoredSession(accessToken: "old-panel-token"),
+      apiKey: "old-gateway-key"
+    )
+    let requests = RequestLog()
+
+    URLProtocolStub.handler = { request in
+      requests.append(request)
+
+      switch request.url?.path {
+      case "/proxy/api/v1/admin/dashboard/stats":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "active_users": 14,
+              "total_accounts": 20,
+              "normal_accounts": 17,
+              "error_accounts": 1,
+              "ratelimit_accounts": 2,
+              "today_requests": 321,
+              "today_actual_cost": 4.25,
+              "rpm": 3.5,
+              "tpm": 840
+            }
+            """
+          )
+        )
+      case "/proxy/api/v1/settings/public":
+        return Self.response(
+          for: request,
+          body: Self.envelope("{\"version\":\"v0.1.183\"}")
+        )
+      default:
+        return Self.unexpectedResponse(for: request)
+      }
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com/proxy/api/v1/",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+    let snapshot = try await client.connectAdminAPIKey("  admin-test-key  ")
+
+    XCTAssertEqual(snapshot.stats.activeUsers, 14)
+    XCTAssertEqual(snapshot.stats.unhealthyAccounts, 3)
+    XCTAssertEqual(try credentials.loadAdminAPIKey(), "admin-test-key")
+    XCTAssertNil(try credentials.loadSession())
+    XCTAssertNil(try credentials.loadAPIKey())
+
+    let statsRequest = requests.request(path: "/proxy/api/v1/admin/dashboard/stats")
+    XCTAssertEqual(statsRequest?.httpMethod, "GET")
+    XCTAssertEqual(statsRequest?.value(forHTTPHeaderField: "x-api-key"), "admin-test-key")
+    XCTAssertNil(statsRequest?.value(forHTTPHeaderField: "Authorization"))
+    XCTAssertEqual(
+      requests.paths,
+      [
+        "/proxy/api/v1/admin/dashboard/stats",
+        "/proxy/api/v1/settings/public",
+      ]
+    )
+  }
+
+  func testDoesNotPersistRejectedAdminAPIKey() async throws {
+    let credentials = InMemoryCredentialStore()
+    let requests = RequestLog()
+    URLProtocolStub.handler = { request in
+      requests.append(request)
+      return Self.response(
+        for: request,
+        status: 401,
+        body: "{\"code\":401,\"message\":\"invalid admin api key\"}"
+      )
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+
+    do {
+      _ = try await client.connectAdminAPIKey("admin-invalid")
+      XCTFail("Expected the admin API Key to be rejected")
+    } catch let error as Sub2APIError {
+      XCTAssertEqual(error, .unauthorized("invalid admin api key"))
+    }
+    XCTAssertNil(try credentials.loadAdminAPIKey())
+    XCTAssertEqual(
+      requests.request(path: "/api/v1/admin/dashboard/stats")?
+        .value(forHTTPHeaderField: "x-api-key"),
+      "admin-invalid"
+    )
+    XCTAssertNil(
+      requests.request(path: "/api/v1/admin/dashboard/stats")?
+        .value(forHTTPHeaderField: "Authorization")
+    )
+  }
+
+  func testMapsAdminComplianceRequirementWithoutPersistingKey() async throws {
+    let credentials = InMemoryCredentialStore()
+    URLProtocolStub.handler = { request in
+      Self.response(
+        for: request,
+        status: 423,
+        body: "{\"code\":\"ADMIN_COMPLIANCE_ACK_REQUIRED\",\"message\":\"ack required\"}"
+      )
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+
+    do {
+      _ = try await client.connectAdminAPIKey("admin-compliance")
+      XCTFail("Expected compliance acknowledgement to be required")
+    } catch let error as Sub2APIError {
+      XCTAssertEqual(error, .adminComplianceRequired)
+    }
+    XCTAssertNil(try credentials.loadAdminAPIKey())
+  }
+
   func testAccountLoginStoresRotatingSessionAndClearsAPIKey() async throws {
-    let credentials = InMemoryCredentialStore(apiKey: "old-api-key")
+    let credentials = InMemoryCredentialStore(
+      apiKey: "old-api-key",
+      adminAPIKey: "old-admin-key"
+    )
     let requests = RequestLog()
 
     URLProtocolStub.handler = { request in
@@ -142,6 +274,7 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(try credentials.loadSession()?.refreshToken, "panel-refresh")
     XCTAssertNotNil(try credentials.loadSession()?.expiresAt)
     XCTAssertNil(try credentials.loadAPIKey())
+    XCTAssertNil(try credentials.loadAdminAPIKey())
 
     XCTAssertEqual(requests.request(path: "/api/v1/auth/login")?.httpMethod, "POST")
     XCTAssertEqual(
@@ -338,6 +471,25 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(allowed.webBaseURL.absoluteString, "http://sub2api.example.com/")
   }
 
+  func testClearCredentialsRemovesEveryAuthenticationMode() async throws {
+    let credentials = InMemoryCredentialStore(
+      session: StoredSession(accessToken: "panel-token"),
+      apiKey: "gateway-key",
+      adminAPIKey: "admin-key"
+    )
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+
+    try await client.clearCredentials()
+
+    XCTAssertNil(try credentials.loadSession())
+    XCTAssertNil(try credentials.loadAPIKey())
+    XCTAssertNil(try credentials.loadAdminAPIKey())
+  }
+
   private func makeStubSession() -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [URLProtocolStub.self]
@@ -404,10 +556,16 @@ private final class InMemoryCredentialStore: CredentialStoring, @unchecked Senda
   private let lock = NSLock()
   private var session: StoredSession?
   private var apiKey: String?
+  private var adminAPIKey: String?
 
-  init(session: StoredSession? = nil, apiKey: String? = nil) {
+  init(
+    session: StoredSession? = nil,
+    apiKey: String? = nil,
+    adminAPIKey: String? = nil
+  ) {
     self.session = session
     self.apiKey = apiKey
+    self.adminAPIKey = adminAPIKey
   }
 
   func loadSession() throws -> StoredSession? {
@@ -434,10 +592,23 @@ private final class InMemoryCredentialStore: CredentialStoring, @unchecked Senda
     lock.withLock { apiKey = nil }
   }
 
+  func loadAdminAPIKey() throws -> String? {
+    lock.withLock { adminAPIKey }
+  }
+
+  func saveAdminAPIKey(_ apiKey: String) throws {
+    lock.withLock { adminAPIKey = apiKey }
+  }
+
+  func clearAdminAPIKey() throws {
+    lock.withLock { adminAPIKey = nil }
+  }
+
   func clearAll() throws {
     lock.withLock {
       session = nil
       apiKey = nil
+      adminAPIKey = nil
     }
   }
 }

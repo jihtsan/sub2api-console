@@ -8,6 +8,9 @@ public protocol CredentialStoring: Sendable {
   func loadAPIKey() throws -> String?
   func saveAPIKey(_ apiKey: String) throws
   func clearAPIKey() throws
+  func loadAdminAPIKey() throws -> String?
+  func saveAdminAPIKey(_ apiKey: String) throws
+  func clearAdminAPIKey() throws
   func clearAll() throws
 }
 
@@ -15,6 +18,7 @@ public struct KeychainCredentialStore: CredentialStoring, Sendable {
   private enum Account {
     static let session = "panel-session"
     static let apiKey = "gateway-api-key"
+    static let adminAPIKey = "admin-api-key"
   }
 
   private let service: String
@@ -64,9 +68,28 @@ public struct KeychainCredentialStore: CredentialStoring, Sendable {
     try delete(account: Account.apiKey)
   }
 
+  public func loadAdminAPIKey() throws -> String? {
+    guard let data = try read(account: Account.adminAPIKey),
+      let value = String(data: data, encoding: .utf8),
+      !value.isEmpty
+    else {
+      return nil
+    }
+    return value
+  }
+
+  public func saveAdminAPIKey(_ apiKey: String) throws {
+    try write(Data(apiKey.utf8), account: Account.adminAPIKey)
+  }
+
+  public func clearAdminAPIKey() throws {
+    try delete(account: Account.adminAPIKey)
+  }
+
   public func clearAll() throws {
     try clearSession()
     try clearAPIKey()
+    try clearAdminAPIKey()
   }
 
   private func baseQuery(account: String) -> [String: Any] {

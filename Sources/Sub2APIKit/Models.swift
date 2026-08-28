@@ -12,6 +12,7 @@ public struct PublicSettings: Decodable, Sendable, Equatable {
   public let siteName: String?
   public let turnstileEnabled: Bool?
   public let tencentCaptchaEnabled: Bool?
+  public let aliyunCaptchaEnabled: Bool?
   public let totpEnabled: Bool?
   public let channelMonitorEnabled: Bool?
   public let channelMonitorMode: String?
@@ -21,6 +22,7 @@ public struct PublicSettings: Decodable, Sendable, Equatable {
     case siteName = "site_name"
     case turnstileEnabled = "turnstile_enabled"
     case tencentCaptchaEnabled = "tencent_captcha_enabled"
+    case aliyunCaptchaEnabled = "aliyun_captcha_enabled"
     case totpEnabled = "totp_enabled"
     case channelMonitorEnabled = "channel_monitor_enabled"
     case channelMonitorMode = "channel_monitor_mode"
@@ -313,6 +315,25 @@ public struct APIKeyMonitorSnapshot: Sendable, Equatable {
   }
 }
 
+public struct AdminAPIKeyMonitorSnapshot: Sendable, Equatable {
+  public let stats: AdminDashboardStats
+  public let publicSettings: PublicSettings?
+  public let warning: String?
+  public let fetchedAt: Date
+
+  public init(
+    stats: AdminDashboardStats,
+    publicSettings: PublicSettings?,
+    warning: String?,
+    fetchedAt: Date = Date()
+  ) {
+    self.stats = stats
+    self.publicSettings = publicSettings
+    self.warning = warning
+    self.fetchedAt = fetchedAt
+  }
+}
+
 public struct AccountMonitorSnapshot: Sendable, Equatable {
   public let user: UserProfile
   public let userStats: UserDashboardStats
@@ -340,11 +361,13 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
 
 public enum MonitorSnapshot: Sendable, Equatable {
   case apiKey(APIKeyMonitorSnapshot)
+  case adminAPIKey(AdminAPIKeyMonitorSnapshot)
   case account(AccountMonitorSnapshot)
 
   public var fetchedAt: Date {
     switch self {
     case .apiKey(let snapshot): snapshot.fetchedAt
+    case .adminAPIKey(let snapshot): snapshot.fetchedAt
     case .account(let snapshot): snapshot.fetchedAt
     }
   }
@@ -352,6 +375,7 @@ public enum MonitorSnapshot: Sendable, Equatable {
   public var warning: String? {
     switch self {
     case .apiKey(let snapshot): snapshot.warning
+    case .adminAPIKey(let snapshot): snapshot.warning
     case .account(let snapshot): snapshot.warning
     }
   }
@@ -359,6 +383,7 @@ public enum MonitorSnapshot: Sendable, Equatable {
   public var serverVersion: String? {
     switch self {
     case .apiKey(let snapshot): snapshot.publicSettings?.version
+    case .adminAPIKey(let snapshot): snapshot.publicSettings?.version
     case .account(let snapshot): snapshot.publicSettings?.version
     }
   }
@@ -367,6 +392,8 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.planName ?? "API Key"
+    case .adminAPIKey:
+      return "管理员 API Key"
     case .account(let snapshot):
       return snapshot.user.username
     }
@@ -376,6 +403,8 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.effectiveRemaining
+    case .adminAPIKey:
+      return nil
     case .account(let snapshot):
       return snapshot.user.balance
     }
@@ -385,6 +414,8 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.usage?.today?.actualCost
+    case .adminAPIKey(let snapshot):
+      return snapshot.stats.todayActualCost
     case .account(let snapshot):
       return snapshot.userStats.todayActualCost
     }
@@ -394,6 +425,8 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.usage?.today?.requests
+    case .adminAPIKey(let snapshot):
+      return snapshot.stats.todayRequests
     case .account(let snapshot):
       return snapshot.userStats.todayRequests
     }
@@ -403,6 +436,8 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.usage?.rpm
+    case .adminAPIKey(let snapshot):
+      return snapshot.stats.rpm
     case .account(let snapshot):
       return snapshot.adminStats?.rpm ?? snapshot.userStats.rpm
     }
@@ -412,6 +447,8 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.usage?.tpm
+    case .adminAPIKey(let snapshot):
+      return snapshot.stats.tpm
     case .account(let snapshot):
       return snapshot.adminStats?.tpm ?? snapshot.userStats.tpm
     }
@@ -421,29 +458,43 @@ public enum MonitorSnapshot: Sendable, Equatable {
     switch self {
     case .apiKey(let snapshot):
       return snapshot.usage.usage?.averageDurationMs
+    case .adminAPIKey(let snapshot):
+      return snapshot.stats.averageDurationMs
     case .account(let snapshot):
       return snapshot.adminStats?.averageDurationMs ?? snapshot.userStats.averageDurationMs
     }
   }
 
   public var adminStats: AdminDashboardStats? {
-    guard case .account(let snapshot) = self else { return nil }
-    return snapshot.adminStats
+    switch self {
+    case .adminAPIKey(let snapshot): snapshot.stats
+    case .account(let snapshot): snapshot.adminStats
+    case .apiKey: nil
+    }
   }
 
   public var isAdmin: Bool {
-    guard case .account(let snapshot) = self else { return false }
-    return snapshot.user.isAdmin
+    switch self {
+    case .adminAPIKey: true
+    case .account(let snapshot): snapshot.user.isAdmin
+    case .apiKey: false
+    }
   }
 
   public var isAPIKey: Bool {
     if case .apiKey = self { return true }
     return false
   }
+
+  public var isAdminAPIKey: Bool {
+    if case .adminAPIKey = self { return true }
+    return false
+  }
 }
 
 public enum AuthenticationMode: String, CaseIterable, Codable, Sendable, Identifiable {
   case apiKey
+  case adminAPIKey
   case account
 
   public var id: String { rawValue }
@@ -524,6 +575,7 @@ public enum Sub2APIError: Error, LocalizedError, Sendable, Equatable {
   case invalidResponse
   case unauthorized(String)
   case captchaRequired
+  case adminComplianceRequired
   case unsupportedServerVersion(String)
   case rateLimited(retryAfter: Int?)
   case api(code: Int, message: String, reason: String?)
@@ -547,6 +599,8 @@ public enum Sub2APIError: Error, LocalizedError, Sendable, Equatable {
       return message.isEmpty ? "凭据已失效，请重新连接。" : message
     case .captchaRequired:
       return "服务器已启用登录验证码，请改用 API Key 连接。"
+    case .adminComplianceRequired:
+      return "请先在 Sub2API Web 管理后台阅读并接受合规声明，然后重新连接。"
     case .unsupportedServerVersion(let version):
       return "服务器 \(version) 存在已知认证安全风险，账户模式要求 v0.1.172 或更高版本。"
     case .rateLimited(let retryAfter):
