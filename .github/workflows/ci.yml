@@ -14,5 +14,7 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      - name: Check account list layout
+        run: ./scripts/check-account-list-layout.sh
       - name: Bundle app
         run: ./scripts/build-app.sh
