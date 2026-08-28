@@ -116,6 +116,55 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
             """
           )
         )
+      case "/proxy/api/v1/admin/accounts":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "items": [
+                {
+                  "id": 42,
+                  "name": "primary-openai",
+                  "platform": "openai",
+                  "type": "oauth",
+                  "status": "active",
+                  "schedulable": true,
+                  "extra": {
+                    "codex_7d_used_percent": 72.5,
+                    "codex_7d_reset_at": "2026-08-29T10:00:00Z"
+                  }
+                }
+              ],
+              "total": 1,
+              "page": 1,
+              "page_size": 100,
+              "pages": 1
+            }
+            """
+          )
+        )
+      case "/proxy/api/v1/admin/accounts/usage/batch":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "usage": {
+                "42": {
+                  "updated_at": "2026-08-28T10:05:00Z",
+                  "seven_day": {
+                    "utilization": 72.5,
+                    "resets_at": "2026-08-29T10:00:00Z",
+                    "remaining_seconds": 86400
+                  }
+                }
+              },
+              "errors": {}
+            }
+            """
+          )
+        )
       case "/proxy/api/v1/settings/public":
         return Self.response(
           for: request,
@@ -135,6 +184,9 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
 
     XCTAssertEqual(snapshot.stats.activeUsers, 14)
     XCTAssertEqual(snapshot.stats.unhealthyAccounts, 3)
+    XCTAssertEqual(snapshot.adminAccounts.count, 1)
+    XCTAssertEqual(snapshot.adminAccounts.first?.account.name, "primary-openai")
+    XCTAssertEqual(snapshot.adminAccounts.first?.sevenDayUsagePercent, 72.5)
     XCTAssertEqual(try credentials.loadAdminAPIKey(), "admin-test-key")
     XCTAssertNil(try credentials.loadSession())
     XCTAssertNil(try credentials.loadAPIKey())
@@ -147,8 +199,163 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
       requests.paths,
       [
         "/proxy/api/v1/admin/dashboard/stats",
+        "/proxy/api/v1/admin/accounts",
+        "/proxy/api/v1/admin/accounts/usage/batch",
         "/proxy/api/v1/settings/public",
       ]
+    )
+    XCTAssertEqual(
+      requests.request(path: "/proxy/api/v1/admin/accounts")?.value(forHTTPHeaderField: "x-api-key"),
+      "admin-test-key"
+    )
+    XCTAssertEqual(
+      requests.queryValue(named: "page_size", path: "/proxy/api/v1/admin/accounts"),
+      "100"
+    )
+    XCTAssertEqual(
+      requests.jsonBody(path: "/proxy/api/v1/admin/accounts/usage/batch")?["force"] as? Bool,
+      false
+    )
+  }
+
+  func testOpenAIQuotaActionsUseDedicatedAdminAPIKeyHeader() async throws {
+    let credentials = InMemoryCredentialStore(adminAPIKey: "admin-actions-key")
+    let requests = RequestLog()
+    URLProtocolStub.handler = { request in
+      requests.append(request)
+      switch request.url?.path {
+      case "/api/v1/admin/openai/accounts/42/quota/refresh":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "user_id": "user-42",
+              "account_id": "chatgpt-42",
+              "email": "operator@example.com",
+              "plan_type": "plus",
+              "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": {
+                  "used_percent": 100,
+                  "limit_window_seconds": 18000,
+                  "reset_after_seconds": 900,
+                  "reset_at": 1788000000
+                }
+              },
+              "rate_limit_reset_credits": {
+                "available_count": 2,
+                "credits": [{"expires_at": "2026-09-01T00:00:00Z"}]
+              },
+              "fetched_at": 1787999100,
+              "cache_persisted": true
+            }
+            """
+          )
+        )
+      case "/api/v1/admin/openai/accounts/42/reset-quota":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "code": "reset_success",
+              "windows_reset": 1,
+              "quota": {
+                "account_id": "chatgpt-42",
+                "rate_limit_reset_credits": {"available_count": 1},
+                "fetched_at": 1787999200
+              },
+              "account": {
+                "id": 42,
+                "name": "primary-openai",
+                "platform": "openai",
+                "type": "oauth",
+                "status": "active",
+                "schedulable": true
+              },
+              "cache_refreshed": true,
+              "account_state_recovered": true
+            }
+            """
+          )
+        )
+      default:
+        return Self.unexpectedResponse(for: request)
+      }
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+
+    let refreshed = try await client.refreshOpenAIQuota(accountID: 42)
+    let reset = try await client.resetOpenAIQuota(accountID: 42)
+
+    XCTAssertEqual(refreshed.email, "operator@example.com")
+    XCTAssertEqual(refreshed.usage.availableResetCount, 2)
+    XCTAssertTrue(refreshed.cachePersisted)
+    XCTAssertEqual(reset.account?.name, "primary-openai")
+    XCTAssertEqual(reset.quota?.availableResetCount, 1)
+    XCTAssertEqual(
+      requests.paths,
+      [
+        "/api/v1/admin/openai/accounts/42/quota/refresh",
+        "/api/v1/admin/openai/accounts/42/reset-quota",
+      ]
+    )
+    for path in requests.paths {
+      XCTAssertEqual(
+        requests.request(path: path)?.value(forHTTPHeaderField: "x-api-key"),
+        "admin-actions-key"
+      )
+      XCTAssertNil(requests.request(path: path)?.value(forHTTPHeaderField: "Authorization"))
+      XCTAssertEqual(requests.request(path: path)?.httpMethod, "POST")
+    }
+  }
+
+  func testOpenAIQuotaActionUsesSessionBearerForAdministratorAccount() async throws {
+    let credentials = InMemoryCredentialStore(
+      session: StoredSession(accessToken: "admin-session")
+    )
+    let requests = RequestLog()
+    URLProtocolStub.handler = { request in
+      requests.append(request)
+      return Self.response(
+        for: request,
+        body: Self.envelope(
+          """
+          {
+            "code": "reset_success",
+            "windows_reset": 1,
+            "cache_refreshed": true,
+            "account_state_recovered": false
+          }
+          """
+        )
+      )
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+
+    let result = try await client.resetOpenAIQuota(accountID: 7)
+
+    XCTAssertEqual(result.windowsReset, 1)
+    XCTAssertEqual(
+      requests.request(path: "/api/v1/admin/openai/accounts/7/reset-quota")?
+        .value(forHTTPHeaderField: "Authorization"),
+      "Bearer admin-session"
+    )
+    XCTAssertNil(
+      requests.request(path: "/api/v1/admin/openai/accounts/7/reset-quota")?
+        .value(forHTTPHeaderField: "x-api-key")
     )
   }
 
