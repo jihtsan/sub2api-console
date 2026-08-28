@@ -498,6 +498,13 @@ public enum AuthenticationMode: String, CaseIterable, Codable, Sendable, Identif
   case account
 
   public var id: String { rawValue }
+
+  public static func apiKeyMode(for rawAPIKey: String) -> Self? {
+    let apiKey = rawAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    if apiKey.hasPrefix("admin-") { return .adminAPIKey }
+    if apiKey.hasPrefix("sk-") { return .apiKey }
+    return nil
+  }
 }
 
 public enum RefreshInterval: Int, CaseIterable, Codable, Sendable, Identifiable {

@@ -36,15 +36,17 @@ private struct ConnectionSettingsView: View {
   @State private var authenticationMode: AuthenticationMode
   @State private var password = ""
   @State private var apiKey = ""
-  @State private var adminAPIKey = ""
   @State private var twoFactorCode = ""
+  @State private var isPasswordVisible = false
 
   init(store: MonitorStore) {
     self.store = store
     settings = store.settings
     _serverAddress = State(initialValue: store.settings.serverAddress)
     _email = State(initialValue: store.settings.email)
-    _authenticationMode = State(initialValue: store.settings.authenticationMode)
+    _authenticationMode = State(
+      initialValue: store.settings.authenticationMode == .account ? .account : .apiKey
+    )
   }
 
   var body: some View {
@@ -67,8 +69,7 @@ private struct ConnectionSettingsView: View {
 
       Section("认证") {
         Picker("方式", selection: $authenticationMode) {
-          Text("普通 Key").tag(AuthenticationMode.apiKey)
-          Text("管理员 Key").tag(AuthenticationMode.adminAPIKey)
+          Text("API Key").tag(AuthenticationMode.apiKey)
           Text("账户").tag(AuthenticationMode.account)
         }
         .pickerStyle(.segmented)
@@ -76,16 +77,18 @@ private struct ConnectionSettingsView: View {
           store.cancelPendingLogin()
           password = ""
           apiKey = ""
-          adminAPIKey = ""
           twoFactorCode = ""
+          isPasswordVisible = false
         }
 
         switch authenticationMode {
         case .account:
           TextField("邮箱", text: $email)
             .textContentType(.emailAddress)
-          SecureField("密码", text: $password)
-            .textContentType(.password)
+          PasswordField(
+            text: $password,
+            isVisible: $isPasswordVisible
+          )
 
           if store.pendingTwoFactorEmail != nil {
             SecureField(
@@ -98,20 +101,33 @@ private struct ConnectionSettingsView: View {
               twoFactorCode = String(value.filter(\.isNumber).prefix(6))
             }
           }
-        case .apiKey:
-          SecureField("普通 API Key", text: $apiKey, prompt: Text("sk-..."))
-            .textContentType(.password)
-        case .adminAPIKey:
-          SecureField("管理员 API Key", text: $adminAPIKey, prompt: Text("admin-..."))
+        case .apiKey, .adminAPIKey:
+          SecureField("API Key", text: $apiKey, prompt: Text("sk-... 或 admin-..."))
             .textContentType(.password)
 
-          Label(
-            "此密钥拥有完整的管理员权限，请妥善保管。",
-            systemImage: "exclamationmark.triangle.fill"
-          )
-          .font(.caption)
-          .foregroundStyle(.orange)
-          .fixedSize(horizontal: false, vertical: true)
+          if let detectedAPIKeyMode {
+            if detectedAPIKeyMode == .adminAPIKey {
+              Label(
+                "已识别为管理员 API Key。此密钥拥有完整的管理员权限，请妥善保管。",
+                systemImage: "exclamationmark.triangle.fill"
+              )
+              .font(.caption)
+              .foregroundStyle(.orange)
+              .fixedSize(horizontal: false, vertical: true)
+            } else {
+              Label("已识别为普通 API Key", systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          } else if !trimmedAPIKey.isEmpty {
+            Label(
+              "无法识别 API Key，请使用 sk- 或 admin- 开头的 Key。",
+              systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.red)
+            .fixedSize(horizontal: false, vertical: true)
+          }
         }
       }
 
@@ -175,10 +191,8 @@ private struct ConnectionSettingsView: View {
     switch authenticationMode {
     case .account:
       return !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
-    case .apiKey:
-      return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    case .adminAPIKey:
-      return !adminAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    case .apiKey, .adminAPIKey:
+      return detectedAPIKeyMode != nil
     }
   }
 
@@ -217,23 +231,62 @@ private struct ConnectionSettingsView: View {
         if store.state == .connected {
           password = ""
         }
-      case .apiKey:
-        await store.connectWithAPIKey(
-          serverAddress: serverAddress,
-          apiKey: apiKey
-        )
+      case .apiKey, .adminAPIKey:
+        guard let detectedAPIKeyMode else { return }
+        switch detectedAPIKeyMode {
+        case .apiKey:
+          await store.connectWithAPIKey(
+            serverAddress: serverAddress,
+            apiKey: apiKey
+          )
+        case .adminAPIKey:
+          await store.connectWithAdminAPIKey(
+            serverAddress: serverAddress,
+            apiKey: apiKey
+          )
+        case .account:
+          return
+        }
         if store.state == .connected {
           apiKey = ""
         }
-      case .adminAPIKey:
-        await store.connectWithAdminAPIKey(
-          serverAddress: serverAddress,
-          apiKey: adminAPIKey
-        )
-        if store.state == .connected {
-          adminAPIKey = ""
+      }
+    }
+  }
+
+  private var trimmedAPIKey: String {
+    apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private var detectedAPIKeyMode: AuthenticationMode? {
+    AuthenticationMode.apiKeyMode(for: trimmedAPIKey)
+  }
+}
+
+private struct PasswordField: View {
+  @Binding var text: String
+  @Binding var isVisible: Bool
+
+  var body: some View {
+    HStack(spacing: 6) {
+      Group {
+        if isVisible {
+          TextField("密码", text: $text)
+        } else {
+          SecureField("密码", text: $text)
         }
       }
+      .textContentType(.password)
+
+      Button {
+        isVisible.toggle()
+      } label: {
+        Image(systemName: isVisible ? "eye.slash" : "eye")
+          .foregroundStyle(.secondary)
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(isVisible ? "隐藏密码" : "显示密码")
+      .help(isVisible ? "隐藏密码" : "显示密码")
     }
   }
 }
