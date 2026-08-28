@@ -599,11 +599,26 @@ private struct AdminAccountRow: View {
 
   @ViewBuilder
   private var resetDescription: some View {
-    if let date = parseDate(account.sevenDayResetAt) {
-      Text("重置于 \(date, style: .relative)")
-    } else if let seconds = account.sevenDayRemainingSeconds, seconds >= 0 {
-      Text("约 \(durationText(seconds)) 后重置")
+    if let date = sevenDayResetDate {
+      VStack(alignment: .trailing, spacing: 1) {
+        Text("约 \(relativeDateText(date))")
+        Text("重置于 \(DisplayFormat.localDateTime(date))")
+      }
+      .multilineTextAlignment(.trailing)
+      .lineLimit(1)
     }
+  }
+
+  private var sevenDayResetDate: Date? {
+    if let date = parseDate(account.sevenDayResetAt) {
+      return date
+    }
+    guard let seconds = account.sevenDayRemainingSeconds, seconds >= 0 else { return nil }
+    let anchorDate = parseDate(account.usage?.updatedAt)
+      ?? parseDate(account.account.extra?.codexUsageUpdatedAt)
+      ?? parseDate(account.account.updatedAt)
+      ?? Date()
+    return anchorDate.addingTimeInterval(seconds)
   }
 
   private var status: AdminAccountStatus {
@@ -626,11 +641,11 @@ private struct AdminAccountRow: View {
   private var statusDetail: String? {
     switch status {
     case .rateLimited:
-      if let date = parseDate(account.account.rateLimitResetAt) {
-        return "限流预计 \(relativeDateText(date))恢复"
+      if let date = account.account.rateLimitResetDate {
+        return "预计 \(DisplayFormat.localDateTime(date)) 恢复（\(relativeDateText(date))）"
       }
       if let date = liveOpenAIRateLimitResetDate {
-        return "限流预计 \(relativeDateText(date))恢复"
+        return "预计 \(DisplayFormat.localDateTime(date)) 恢复（\(relativeDateText(date))）"
       }
       return "等待上游限流窗口恢复"
     case .overloaded:
@@ -655,10 +670,17 @@ private struct AdminAccountRow: View {
   }
 
   private var liveOpenAIRateLimitResetDate: Date? {
-    guard let timestamp = store.openAIQuota(for: account.id)?.rateLimit?.primaryWindow?.resetAt,
-      timestamp > 0
+    guard let usage = store.openAIQuota(for: account.id),
+      let window = usage.rateLimit?.primaryWindow
     else { return nil }
-    return Date(timeIntervalSince1970: timestamp)
+    if window.resetAt > 0 {
+      return Date(timeIntervalSince1970: window.resetAt)
+    }
+    guard window.resetAfterSeconds > 0 else { return nil }
+    let anchorDate = usage.fetchedAt > 0
+      ? Date(timeIntervalSince1970: usage.fetchedAt)
+      : Date()
+    return anchorDate.addingTimeInterval(window.resetAfterSeconds)
   }
 
   private var platformName: String {
