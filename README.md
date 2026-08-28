@@ -68,6 +68,7 @@ swift run Sub2APIConsole
 - Access Token、Refresh Token 和 API Key 只存储在 macOS Keychain。
 - 账户密码仅用于当次登录请求，不写入磁盘。
 - 除本机开发环境外，请始终使用 HTTPS。
+- 应用包为兼容用户显式开启的远程 HTTP 声明了 ATS 例外，但应用层默认仍拒绝远程 HTTP；只有打开“允许不安全 HTTP”后才会放行。
 - 客户端不会记录或上传凭据，也不包含第三方分析 SDK。
 
 漏洞报告方式见 [SECURITY.md](SECURITY.md)。
