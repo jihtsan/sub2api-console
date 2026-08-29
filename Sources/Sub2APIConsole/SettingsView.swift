@@ -22,7 +22,7 @@ struct SettingsView: View {
           Label("关于", systemImage: "info.circle")
         }
     }
-    .frame(width: 520, height: 420)
+    .frame(width: 560, height: 560)
     .onAppear { store.start() }
   }
 }
@@ -291,10 +291,46 @@ private struct PasswordField: View {
   }
 }
 
+private enum DashboardMetricPreset: String, CaseIterable, Hashable, Identifiable {
+  case summary
+  case operations
+  case traffic
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .summary: "运营概览"
+    case .operations: "请求运维"
+    case .traffic: "流量用量"
+    }
+  }
+
+  var description: String {
+    switch self {
+    case .summary: "消费、请求、Token、平均响应和异常率"
+    case .operations: "请求、响应时长、P95、异常率和成功率"
+    case .traffic: "请求、Token、RPM、TPM 和消费"
+    }
+  }
+
+  var metrics: [DashboardMetric] {
+    switch self {
+    case .summary:
+      [.todayCost, .todayRequests, .todayTokens, .averageDuration, .errorRate]
+    case .operations:
+      [.todayRequests, .averageDuration, .p95Duration, .errorRate, .sla]
+    case .traffic:
+      [.todayRequests, .todayTokens, .rpm, .tpm, .todayCost]
+    }
+  }
+}
+
 private struct MonitoringSettingsView: View {
   @ObservedObject var store: MonitorStore
   @ObservedObject var launchAtLogin: LaunchAtLoginController
   @ObservedObject private var settings: SettingsStore
+  @State private var selectedPreset: DashboardMetricPreset?
 
   init(store: MonitorStore, launchAtLogin: LaunchAtLoginController) {
     self.store = store
@@ -321,6 +357,65 @@ private struct MonitoringSettingsView: View {
         }
       }
 
+      Section("摘要卡片") {
+        Picker("预设", selection: $selectedPreset) {
+          ForEach(DashboardMetricPreset.allCases) { preset in
+            Text(preset.title)
+              .tag(preset as DashboardMetricPreset?)
+          }
+          Text("自定义")
+            .tag(nil as DashboardMetricPreset?)
+        }
+        .onChange(of: selectedPreset) { _, preset in
+          guard let preset else { return }
+          settings.applyDashboardMetrics(preset.metrics)
+        }
+
+        Text(selectedPreset?.description ?? "按需选择要显示的指标")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+
+        HStack {
+          Text("已选择")
+          Spacer()
+          Text("\(settings.dashboardMetrics.count) / \(SettingsStore.maxDashboardMetrics)")
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        }
+        .font(.caption)
+
+        ForEach(DashboardMetric.allCases) { metric in
+          Toggle(
+            isOn: Binding(
+              get: { settings.dashboardMetrics.contains(metric) },
+              set: { settings.setDashboardMetric(metric, enabled: $0) }
+            )
+          ) {
+            HStack(spacing: 7) {
+              Label(
+                DisplayFormat.dashboardMetricName(metric),
+                systemImage: dashboardMetricSymbol(metric)
+              )
+              Spacer(minLength: 8)
+              if metric.requiresAdminOps {
+                Text("管理员 Ops")
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+              }
+            }
+          }
+          .disabled(
+            !settings.dashboardMetrics.contains(metric)
+              && settings.dashboardMetrics.count >= SettingsStore.maxDashboardMetrics
+          )
+        }
+
+        Text("异常率、P95 和成功率需要管理员权限与服务端 Ops 监控；不支持时会显示为暂无数据。")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
       Section("系统") {
         Toggle(
           "登录时启动",
@@ -339,6 +434,28 @@ private struct MonitoringSettingsView: View {
     }
     .formStyle(.grouped)
     .padding(.top, 8)
+    .onAppear { synchronizePreset() }
+    .onChange(of: settings.dashboardMetrics) { _, _ in synchronizePreset() }
+  }
+
+  private func synchronizePreset() {
+    selectedPreset = DashboardMetricPreset.allCases.first {
+      $0.metrics == settings.dashboardMetrics
+    }
+  }
+
+  private func dashboardMetricSymbol(_ metric: DashboardMetric) -> String {
+    switch metric {
+    case .todayCost: "arrow.up.right"
+    case .todayRequests: "arrow.left.arrow.right"
+    case .todayTokens: "number"
+    case .averageDuration: "timer"
+    case .p95Duration: "chart.line.uptrend.xyaxis"
+    case .errorRate: "exclamationmark.triangle"
+    case .sla: "checkmark.shield"
+    case .rpm: "speedometer"
+    case .tpm: "number"
+    }
   }
 }
 

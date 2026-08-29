@@ -67,6 +67,41 @@ final class ModelDecodingTests: XCTestCase {
     XCTAssertEqual(stats.unhealthyAccounts, 6)
   }
 
+  func testDecodesOptionalOpsOverviewMetrics() throws {
+    let json = Data(
+      """
+      {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "generated_at": "2026-08-29T04:00:00Z",
+          "overview": {
+            "success_count": 98,
+            "error_count_total": 2,
+            "request_count_total": 100,
+            "sla": 0.98,
+            "error_rate": 0.02,
+            "qps": {"current": 1.2, "peak": 4.5, "avg": 2.1},
+            "duration": {"p50_ms": 420, "p95_ms": 1800, "p99_ms": 3200}
+          },
+          "future_field": true
+        }
+      }
+      """.utf8
+    )
+
+    let envelope = try JSONDecoder().decode(
+      APIEnvelope<OpsDashboardSnapshot>.self,
+      from: json
+    )
+
+    XCTAssertEqual(envelope.data?.overview?.requestCountTotal, 100)
+    XCTAssertEqual(envelope.data?.overview?.errorRate, 0.02)
+    XCTAssertEqual(envelope.data?.overview?.sla, 0.98)
+    XCTAssertEqual(envelope.data?.overview?.qps?.average, 2.1)
+    XCTAssertEqual(envelope.data?.overview?.duration?.p95Ms, 1800)
+  }
+
   func testDecodesAdminAccountListWithCodexSevenDayUsageAndHealthState() throws {
     let json = Data(
       """

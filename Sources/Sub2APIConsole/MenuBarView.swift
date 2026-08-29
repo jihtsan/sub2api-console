@@ -45,9 +45,15 @@ struct MenuBarLabel: View {
 
 struct MenuBarView: View {
   @ObservedObject var store: MonitorStore
+  @ObservedObject private var settings: SettingsStore
   @State private var adminListTab: AdminListTab = .accounts
   @State private var apiKeySortOption: AdminAPIKeySortOption = .todayRequests
   @State private var apiKeySortDescending = true
+
+  init(store: MonitorStore) {
+    self.store = store
+    _settings = ObservedObject(wrappedValue: store.settings)
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -138,40 +144,16 @@ struct MenuBarView: View {
   @ViewBuilder
   private func dashboard(_ snapshot: MonitorSnapshot) -> some View {
     VStack(alignment: .leading, spacing: 14) {
-      Grid(horizontalSpacing: 14, verticalSpacing: 14) {
-        GridRow {
+      LazyVGrid(
+        columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 3),
+        alignment: .leading,
+        spacing: 14
+      ) {
+        ForEach(settings.dashboardMetrics) { metric in
           MetricCell(
-            title: primaryMetricTitle(snapshot),
-            value: primaryMetricValue(snapshot),
-            systemImage: snapshot.isAdminAPIKey ? "person.2" : "creditcard"
-          )
-          MetricCell(
-            title: "今日消费",
-            value: DisplayFormat.currency(snapshot.todayCost),
-            systemImage: "arrow.up.right"
-          )
-          MetricCell(
-            title: "今日请求",
-            value: DisplayFormat.count(snapshot.todayRequests),
-            systemImage: "arrow.left.arrow.right"
-          )
-        }
-
-        GridRow {
-          MetricCell(
-            title: "RPM",
-            value: DisplayFormat.rate(snapshot.rpm),
-            systemImage: "speedometer"
-          )
-          MetricCell(
-            title: "TPM",
-            value: DisplayFormat.rate(snapshot.tpm),
-            systemImage: "number"
-          )
-          MetricCell(
-            title: "平均延迟",
-            value: DisplayFormat.duration(milliseconds: snapshot.averageDurationMs),
-            systemImage: "timer"
+            title: dashboardMetricTitle(metric),
+            value: dashboardMetricValue(metric, snapshot),
+            systemImage: dashboardMetricSymbol(metric)
           )
         }
       }
@@ -219,19 +201,48 @@ struct MenuBarView: View {
     .frame(maxHeight: .infinity, alignment: .top)
   }
 
-  private func primaryMetricTitle(_ snapshot: MonitorSnapshot) -> String {
-    if snapshot.isAdminAPIKey { return "活跃用户" }
-    return snapshot.isAPIKey ? "可用额度" : "余额"
+  private func dashboardMetricTitle(_ metric: DashboardMetric) -> String {
+    DisplayFormat.dashboardMetricName(metric)
   }
 
-  private func primaryMetricValue(_ snapshot: MonitorSnapshot) -> String {
-    if snapshot.isAdminAPIKey {
-      return DisplayFormat.count(snapshot.adminStats?.activeUsers)
+  private func dashboardMetricValue(
+    _ metric: DashboardMetric,
+    _ snapshot: MonitorSnapshot
+  ) -> String {
+    switch metric {
+    case .todayCost:
+      return DisplayFormat.currency(snapshot.todayCost)
+    case .todayRequests:
+      return DisplayFormat.count(snapshot.todayRequests)
+    case .todayTokens:
+      return DisplayFormat.count(snapshot.todayTokens)
+    case .averageDuration:
+      return DisplayFormat.duration(milliseconds: snapshot.averageDurationMs)
+    case .p95Duration:
+      return DisplayFormat.duration(milliseconds: snapshot.p95DurationMs)
+    case .errorRate:
+      return DisplayFormat.ratioPercentage(snapshot.errorRate)
+    case .sla:
+      return DisplayFormat.ratioPercentage(snapshot.sla)
+    case .rpm:
+      return DisplayFormat.rate(snapshot.rpm)
+    case .tpm:
+      return DisplayFormat.rate(snapshot.tpm)
     }
-    if snapshot.isAPIKey {
-      return DisplayFormat.currencyOrUnlimitedDisplay(snapshot.remaining)
+  }
+
+  private func dashboardMetricSymbol(_ metric: DashboardMetric) -> String {
+    switch metric {
+    case .todayCost: "arrow.up.right"
+    case .todayRequests: "arrow.left.arrow.right"
+    case .todayTokens: "number"
+    case .averageDuration: "timer"
+    case .p95Duration: "chart.line.uptrend.xyaxis"
+    case .errorRate: "exclamationmark.triangle"
+    case .sla: "checkmark.shield"
+    case .rpm: "speedometer"
+    case .tpm: "number"
     }
-    return DisplayFormat.currency(snapshot.remaining)
   }
 
   private func usageLimits(_ usage: APIKeyUsage) -> some View {
@@ -358,10 +369,7 @@ struct MenuBarView: View {
         HealthPill(title: "异常", value: stats.errorAccounts ?? 0, color: .red)
         HealthPill(title: "限流", value: stats.rateLimitAccounts ?? 0, color: .orange)
         HealthPill(title: "过载", value: stats.overloadAccounts ?? 0, color: .yellow)
-        Spacer()
-        Label("\(stats.activeUsers ?? 0)", systemImage: "person.2")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        Spacer(minLength: 0)
       }
     }
   }
