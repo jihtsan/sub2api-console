@@ -771,12 +771,21 @@ private final class MenuBarWindowSizeCoordinator: ObservableObject {
     guard currentContentSize.width > 0, currentContentSize.height > 0 else { return }
     guard abs(currentContentSize.height - measuredContentSize.height) > 0.5 else { return }
 
-    window.setContentSize(
-      NSSize(
+    let currentFrame = window.frame
+    let anchoredTop = currentFrame.maxY
+    let targetContentRect = NSRect(
+      origin: .zero,
+      size: NSSize(
         width: currentContentSize.width,
         height: measuredContentSize.height
       )
     )
+    var targetFrame = window.frameRect(forContentRect: targetContentRect)
+    targetFrame.origin.x = currentFrame.origin.x
+    targetFrame.origin.y = anchoredTop - targetFrame.height
+    targetFrame.size.width = currentFrame.width
+
+    window.setFrame(targetFrame, display: true, animate: false)
   }
 }
 
