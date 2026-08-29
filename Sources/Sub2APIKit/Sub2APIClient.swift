@@ -132,6 +132,7 @@ public actor Sub2APIClient {
     guard !apiKey.isEmpty else { throw Sub2APIError.missingCredentials }
 
     let stats = try await requestAdminDashboardStats(apiKey: apiKey)
+    let opsSnapshot = await loadAdminOpsSnapshot(apiKey: apiKey)
     let accountResult = await loadAdminAccountSnapshots(apiKey: apiKey)
     try credentialStore.saveAdminAPIKey(apiKey)
     try credentialStore.clearSession()
@@ -139,6 +140,7 @@ public actor Sub2APIClient {
     return AdminAPIKeyMonitorSnapshot(
       stats: stats,
       adminAccounts: accountResult.accounts,
+      opsSnapshot: opsSnapshot,
       publicSettings: await loadPublicSettingsBestEffort(),
       warning: combinedWarning(compatibilityWarning(), accountResult.warning)
     )
@@ -149,10 +151,12 @@ public actor Sub2APIClient {
       throw Sub2APIError.missingCredentials
     }
     let stats = try await requestAdminDashboardStats(apiKey: apiKey)
+    let opsSnapshot = await loadAdminOpsSnapshot(apiKey: apiKey)
     let accountResult = await loadAdminAccountSnapshots(apiKey: apiKey)
     return AdminAPIKeyMonitorSnapshot(
       stats: stats,
       adminAccounts: accountResult.accounts,
+      opsSnapshot: opsSnapshot,
       publicSettings: await loadPublicSettingsBestEffort(),
       warning: combinedWarning(compatibilityWarning(), accountResult.warning)
     )
@@ -222,6 +226,7 @@ public actor Sub2APIClient {
 
     var adminStats: AdminDashboardStats?
     var adminAccounts: [AdminAccountSnapshot] = []
+    var opsSnapshot: OpsDashboardSnapshot?
     var warnings: [String] = []
     if user.isAdmin {
       do {
@@ -229,6 +234,8 @@ public actor Sub2APIClient {
       } catch {
         warnings.append("管理员统计暂不可用：\(error.localizedDescription)")
       }
+
+      opsSnapshot = await loadAdminOpsSnapshot()
 
       let accountResult = await loadAdminAccountSnapshots(apiKey: nil)
       adminAccounts = accountResult.accounts
@@ -246,6 +253,7 @@ public actor Sub2APIClient {
       userStats: userStats,
       adminStats: adminStats,
       adminAccounts: adminAccounts,
+      opsSnapshot: opsSnapshot,
       publicSettings: publicSettings,
       warning: warnings.isEmpty ? nil : warnings.joined(separator: "\n")
     )
@@ -579,6 +587,38 @@ public actor Sub2APIClient {
         throw Sub2APIError.adminComplianceRequired
       }
       throw error
+    }
+  }
+
+  private func loadAdminOpsSnapshot(apiKey: String) async -> OpsDashboardSnapshot? {
+    do {
+      return try await adminAPIKeyRequest(
+        path: "admin/ops/dashboard/snapshot-v2",
+        method: "GET",
+        body: nil,
+        queryItems: [URLQueryItem(name: "time_range", value: "1h")],
+        apiKey: apiKey
+      )
+    } catch {
+      // Ops monitoring is optional and may be disabled or unavailable on older
+      // servers. The regular admin dashboard remains useful in that case.
+      return nil
+    }
+  }
+
+  private func loadAdminOpsSnapshot() async -> OpsDashboardSnapshot? {
+    do {
+      return try await requestAdminAuthorized(
+        path: "admin/ops/dashboard/snapshot-v2",
+        method: "GET",
+        body: nil,
+        queryItems: [URLQueryItem(name: "time_range", value: "1h")],
+        timeoutInterval: 30
+      )
+    } catch {
+      // Ops monitoring is optional and may be disabled or unavailable on older
+      // servers. The regular admin dashboard remains useful in that case.
+      return nil
     }
   }
 

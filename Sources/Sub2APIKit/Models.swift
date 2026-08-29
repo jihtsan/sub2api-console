@@ -163,6 +163,77 @@ public struct AdminDashboardStats: Decodable, Sendable, Equatable {
   }
 }
 
+/// A compact, read-only snapshot from the administrator Ops dashboard.
+///
+/// Ops monitoring is optional on the server, so every field is deliberately
+/// optional. This lets older servers and disabled installations continue to
+/// provide the regular dashboard summary.
+public struct OpsDashboardSnapshot: Decodable, Sendable, Equatable {
+  public let generatedAt: String?
+  public let overview: OpsDashboardOverview?
+
+  enum CodingKeys: String, CodingKey {
+    case generatedAt = "generated_at"
+    case overview
+  }
+}
+
+public struct OpsDashboardOverview: Decodable, Sendable, Equatable {
+  public let healthScore: Int?
+  public let successCount: Int64?
+  public let errorCountTotal: Int64?
+  public let requestCountTotal: Int64?
+  public let tokenConsumed: Int64?
+  public let sla: Double?
+  public let errorRate: Double?
+  public let upstreamErrorRate: Double?
+  public let qps: OpsRateSummary?
+  public let tps: OpsRateSummary?
+  public let duration: OpsPercentiles?
+  public let ttft: OpsPercentiles?
+
+  enum CodingKeys: String, CodingKey {
+    case healthScore = "health_score"
+    case successCount = "success_count"
+    case errorCountTotal = "error_count_total"
+    case requestCountTotal = "request_count_total"
+    case tokenConsumed = "token_consumed"
+    case sla
+    case errorRate = "error_rate"
+    case upstreamErrorRate = "upstream_error_rate"
+    case qps, tps, duration, ttft
+  }
+}
+
+public struct OpsRateSummary: Decodable, Sendable, Equatable {
+  public let current: Double?
+  public let peak: Double?
+  public let average: Double?
+
+  enum CodingKeys: String, CodingKey {
+    case current, peak
+    case average = "avg"
+  }
+}
+
+public struct OpsPercentiles: Decodable, Sendable, Equatable {
+  public let p50Ms: Int?
+  public let p90Ms: Int?
+  public let p95Ms: Int?
+  public let p99Ms: Int?
+  public let averageMs: Int?
+  public let maxMs: Int?
+
+  enum CodingKeys: String, CodingKey {
+    case p50Ms = "p50_ms"
+    case p90Ms = "p90_ms"
+    case p95Ms = "p95_ms"
+    case p99Ms = "p99_ms"
+    case averageMs = "avg_ms"
+    case maxMs = "max_ms"
+  }
+}
+
 public struct AdminAccount: Decodable, Sendable, Equatable, Identifiable {
   public let id: Int64
   public let name: String
@@ -806,6 +877,7 @@ public struct APIKeyMonitorSnapshot: Sendable, Equatable {
 public struct AdminAPIKeyMonitorSnapshot: Sendable, Equatable {
   public let stats: AdminDashboardStats
   public let adminAccounts: [AdminAccountSnapshot]
+  public let opsSnapshot: OpsDashboardSnapshot?
   public let publicSettings: PublicSettings?
   public let warning: String?
   public let fetchedAt: Date
@@ -813,12 +885,14 @@ public struct AdminAPIKeyMonitorSnapshot: Sendable, Equatable {
   public init(
     stats: AdminDashboardStats,
     adminAccounts: [AdminAccountSnapshot] = [],
+    opsSnapshot: OpsDashboardSnapshot? = nil,
     publicSettings: PublicSettings?,
     warning: String?,
     fetchedAt: Date = Date()
   ) {
     self.stats = stats
     self.adminAccounts = adminAccounts
+    self.opsSnapshot = opsSnapshot
     self.publicSettings = publicSettings
     self.warning = warning
     self.fetchedAt = fetchedAt
@@ -830,6 +904,7 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
   public let userStats: UserDashboardStats
   public let adminStats: AdminDashboardStats?
   public let adminAccounts: [AdminAccountSnapshot]
+  public let opsSnapshot: OpsDashboardSnapshot?
   public let publicSettings: PublicSettings?
   public let warning: String?
   public let fetchedAt: Date
@@ -839,6 +914,7 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
     userStats: UserDashboardStats,
     adminStats: AdminDashboardStats?,
     adminAccounts: [AdminAccountSnapshot] = [],
+    opsSnapshot: OpsDashboardSnapshot? = nil,
     publicSettings: PublicSettings?,
     warning: String?,
     fetchedAt: Date = Date()
@@ -847,6 +923,7 @@ public struct AccountMonitorSnapshot: Sendable, Equatable {
     self.userStats = userStats
     self.adminStats = adminStats
     self.adminAccounts = adminAccounts
+    self.opsSnapshot = opsSnapshot
     self.publicSettings = publicSettings
     self.warning = warning
     self.fetchedAt = fetchedAt
@@ -926,6 +1003,17 @@ public enum MonitorSnapshot: Sendable, Equatable {
     }
   }
 
+  public var todayTokens: Int? {
+    switch self {
+    case .apiKey(let snapshot):
+      return snapshot.usage.usage?.today?.totalTokens
+    case .adminAPIKey(let snapshot):
+      return snapshot.stats.todayTokens
+    case .account(let snapshot):
+      return snapshot.userStats.todayTokens
+    }
+  }
+
   public var rpm: Double? {
     switch self {
     case .apiKey(let snapshot):
@@ -956,6 +1044,42 @@ public enum MonitorSnapshot: Sendable, Equatable {
       return snapshot.stats.averageDurationMs
     case .account(let snapshot):
       return snapshot.adminStats?.averageDurationMs ?? snapshot.userStats.averageDurationMs
+    }
+  }
+
+  public var p95DurationMs: Double? {
+    guard isAdmin else { return nil }
+    switch self {
+    case .adminAPIKey(let snapshot):
+      return snapshot.opsSnapshot?.overview?.duration?.p95Ms.map(Double.init)
+    case .account(let snapshot):
+      return snapshot.opsSnapshot?.overview?.duration?.p95Ms.map(Double.init)
+    case .apiKey:
+      return nil
+    }
+  }
+
+  public var errorRate: Double? {
+    guard isAdmin else { return nil }
+    switch self {
+    case .adminAPIKey(let snapshot):
+      return snapshot.opsSnapshot?.overview?.errorRate
+    case .account(let snapshot):
+      return snapshot.opsSnapshot?.overview?.errorRate
+    case .apiKey:
+      return nil
+    }
+  }
+
+  public var sla: Double? {
+    guard isAdmin else { return nil }
+    switch self {
+    case .adminAPIKey(let snapshot):
+      return snapshot.opsSnapshot?.overview?.sla
+    case .account(let snapshot):
+      return snapshot.opsSnapshot?.overview?.sla
+    case .apiKey:
+      return nil
     }
   }
 
@@ -1035,6 +1159,29 @@ public enum MenuBarMetric: String, CaseIterable, Codable, Sendable, Identifiable
   case statusOnly
 
   public var id: String { rawValue }
+}
+
+public enum DashboardMetric: String, CaseIterable, Codable, Hashable, Sendable, Identifiable {
+  case todayCost
+  case todayRequests
+  case todayTokens
+  case averageDuration
+  case p95Duration
+  case errorRate
+  case sla
+  case rpm
+  case tpm
+
+  public var id: String { rawValue }
+
+  public var requiresAdminOps: Bool {
+    switch self {
+    case .p95Duration, .errorRate, .sla:
+      return true
+    case .todayCost, .todayRequests, .todayTokens, .averageDuration, .rpm, .tpm:
+      return false
+    }
+  }
 }
 
 public struct StoredSession: Codable, Sendable, Equatable {

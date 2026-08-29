@@ -60,6 +60,11 @@ enum DisplayFormat {
     return "\(Int(milliseconds.rounded()))ms"
   }
 
+  static func ratioPercentage(_ ratio: Double?) -> String {
+    guard let ratio else { return unavailable }
+    return percentageText(ratio * 100)
+  }
+
   static func refreshInterval(_ interval: RefreshInterval) -> String {
     switch interval {
     case .oneMinute: "1 分钟"
@@ -77,6 +82,20 @@ enum DisplayFormat {
     case .rpm: "RPM"
     case .health: "健康状态"
     case .statusOnly: "仅状态"
+    }
+  }
+
+  static func dashboardMetricName(_ metric: DashboardMetric) -> String {
+    switch metric {
+    case .todayCost: "今日消费"
+    case .todayRequests: "今日请求"
+    case .todayTokens: "今日 Token"
+    case .averageDuration: "平均响应"
+    case .p95Duration: "P95 响应"
+    case .errorRate: "异常率"
+    case .sla: "成功率"
+    case .rpm: "RPM"
+    case .tpm: "TPM"
     }
   }
 
