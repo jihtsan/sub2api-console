@@ -16,9 +16,11 @@ matches() {
 
 if ! matches 'private func adminAccountList\(' \
   || ! matches '\.frame\(height: accountListViewportHeight\(for: accounts\.count\)\)' \
-  || ! matches 'VStack\(spacing: 0\)'; then
-  print -u2 "Account list layout regression: populated rows must use a non-zero viewport and a regular VStack."
+  || ! matches 'VStack\(spacing: 0\)' \
+  || ! matches 'switch adminListTab' \
+  || ! matches '\.id\(adminListTab\)'; then
+  print -u2 "Admin list layout regression: populated rows must use a non-zero viewport and keyed content when switching lists."
   exit 1
 fi
 
-print "Account list layout regression check passed."
+print "Admin list layout regression check passed."
