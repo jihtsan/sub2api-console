@@ -14,7 +14,7 @@ final class SettingsStore: ObservableObject {
     static let allowInsecureHTTP = "allowInsecureHTTP"
   }
 
-  static let maxDashboardMetrics = 5
+  static let maxDashboardMetrics = 6
   static let defaultDashboardMetrics: [DashboardMetric] = [
     .todayCost,
     .todayRequests,
