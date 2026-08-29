@@ -405,12 +405,17 @@ struct MenuBarView: View {
         Task { await store.refreshAdminAPIKeysIfNeeded() }
       }
 
-      switch adminListTab {
-      case .accounts:
-        adminAccountList(snapshot.adminAccounts)
-      case .apiKeys:
-        adminAPIKeyList()
+      Group {
+        switch adminListTab {
+        case .accounts:
+          adminAccountList(snapshot.adminAccounts)
+        case .apiKeys:
+          adminAPIKeyList()
+        }
       }
+      // Menu-bar popovers can retain the previous hosting subtree's height.
+      // Recreate the selected list so the popover measures the new content.
+      .id(adminListTab)
     }
   }
 
