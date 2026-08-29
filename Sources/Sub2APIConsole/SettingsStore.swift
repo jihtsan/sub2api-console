@@ -10,8 +10,18 @@ final class SettingsStore: ObservableObject {
     static let authenticationMode = "authenticationMode"
     static let refreshInterval = "refreshInterval"
     static let menuBarMetric = "menuBarMetric"
+    static let dashboardMetrics = "dashboardMetrics"
     static let allowInsecureHTTP = "allowInsecureHTTP"
   }
+
+  static let maxDashboardMetrics = 5
+  static let defaultDashboardMetrics: [DashboardMetric] = [
+    .todayCost,
+    .todayRequests,
+    .todayTokens,
+    .averageDuration,
+    .errorRate,
+  ]
 
   private let defaults: UserDefaults
 
@@ -35,6 +45,10 @@ final class SettingsStore: ObservableObject {
     didSet { defaults.set(menuBarMetric.rawValue, forKey: Key.menuBarMetric) }
   }
 
+  @Published private(set) var dashboardMetrics: [DashboardMetric] {
+    didSet { defaults.set(dashboardMetrics.map(\.rawValue), forKey: Key.dashboardMetrics) }
+  }
+
   @Published var allowInsecureHTTP: Bool {
     didSet { defaults.set(allowInsecureHTTP, forKey: Key.allowInsecureHTTP) }
   }
@@ -51,6 +65,34 @@ final class SettingsStore: ObservableObject {
       ) ?? .oneMinute
     let storedMetric = defaults.string(forKey: Key.menuBarMetric) ?? ""
     menuBarMetric = MenuBarMetric(rawValue: storedMetric) ?? .remaining
+    let storedDashboardMetrics = defaults.stringArray(forKey: Key.dashboardMetrics)?
+      .compactMap(DashboardMetric.init(rawValue:))
+    dashboardMetrics = Self.normalizedDashboardMetrics(
+      storedDashboardMetrics ?? Self.defaultDashboardMetrics
+    )
     allowInsecureHTTP = defaults.bool(forKey: Key.allowInsecureHTTP)
+  }
+
+  func setDashboardMetric(_ metric: DashboardMetric, enabled: Bool) {
+    var selection = dashboardMetrics
+    if enabled {
+      guard !selection.contains(metric), selection.count < Self.maxDashboardMetrics else { return }
+      selection.append(metric)
+    } else {
+      selection.removeAll { $0 == metric }
+    }
+    dashboardMetrics = Self.normalizedDashboardMetrics(selection)
+  }
+
+  func applyDashboardMetrics(_ metrics: [DashboardMetric]) {
+    dashboardMetrics = Self.normalizedDashboardMetrics(metrics)
+  }
+
+  private static func normalizedDashboardMetrics(_ metrics: [DashboardMetric]) -> [DashboardMetric] {
+    var seen = Set<DashboardMetric>()
+    return Array(
+      metrics.filter { seen.insert($0).inserted }
+        .prefix(maxDashboardMetrics)
+    )
   }
 }

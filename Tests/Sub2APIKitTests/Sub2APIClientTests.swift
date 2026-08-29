@@ -116,6 +116,22 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
             """
           )
         )
+      case "/proxy/api/v1/admin/ops/dashboard/snapshot-v2":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            """
+            {
+              "generated_at": "2026-08-29T04:00:00Z",
+              "overview": {
+                "error_rate": 0.025,
+                "sla": 0.975,
+                "duration": {"p95_ms": 1800}
+              }
+            }
+            """
+          )
+        )
       case "/proxy/api/v1/admin/accounts":
         return Self.response(
           for: request,
@@ -184,6 +200,9 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
 
     XCTAssertEqual(snapshot.stats.activeUsers, 14)
     XCTAssertEqual(snapshot.stats.unhealthyAccounts, 3)
+    XCTAssertEqual(snapshot.opsSnapshot?.overview?.errorRate, 0.025)
+    XCTAssertEqual(snapshot.opsSnapshot?.overview?.sla, 0.975)
+    XCTAssertEqual(snapshot.opsSnapshot?.overview?.duration?.p95Ms, 1800)
     XCTAssertEqual(snapshot.adminAccounts.count, 1)
     XCTAssertEqual(snapshot.adminAccounts.first?.account.name, "primary-openai")
     XCTAssertEqual(snapshot.adminAccounts.first?.sevenDayUsagePercent, 72.5)
@@ -199,6 +218,7 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
       requests.paths,
       [
         "/proxy/api/v1/admin/dashboard/stats",
+        "/proxy/api/v1/admin/ops/dashboard/snapshot-v2",
         "/proxy/api/v1/admin/accounts",
         "/proxy/api/v1/admin/accounts/usage/batch",
         "/proxy/api/v1/settings/public",
@@ -213,8 +233,67 @@ final class Sub2APIClientTests: XCTestCase, @unchecked Sendable {
       "100"
     )
     XCTAssertEqual(
+      requests.queryValue(
+        named: "time_range",
+        path: "/proxy/api/v1/admin/ops/dashboard/snapshot-v2"
+      ),
+      "1h"
+    )
+    let opsRequest = requests.request(path: "/proxy/api/v1/admin/ops/dashboard/snapshot-v2")
+    XCTAssertEqual(opsRequest?.value(forHTTPHeaderField: "x-api-key"), "admin-test-key")
+    XCTAssertNil(opsRequest?.value(forHTTPHeaderField: "Authorization"))
+    XCTAssertEqual(
       requests.jsonBody(path: "/proxy/api/v1/admin/accounts/usage/batch")?["force"] as? Bool,
       false
+    )
+  }
+
+  func testKeepsAdminSnapshotWhenOpsMonitoringIsUnavailable() async throws {
+    let credentials = InMemoryCredentialStore()
+    let requests = RequestLog()
+
+    URLProtocolStub.handler = { request in
+      requests.append(request)
+
+      switch request.url?.path {
+      case "/api/v1/admin/dashboard/stats":
+        return Self.response(
+          for: request,
+          body: Self.envelope("{\"today_requests\":7,\"today_actual_cost\":0.5}")
+        )
+      case "/api/v1/admin/ops/dashboard/snapshot-v2":
+        return Self.response(for: request, status: 404, body: "{\"message\":\"not found\"}")
+      case "/api/v1/admin/accounts":
+        return Self.response(
+          for: request,
+          body: Self.envelope(
+            "{\"items\":[],\"total\":0,\"page\":1,\"page_size\":100,\"pages\":1}"
+          )
+        )
+      case "/api/v1/settings/public":
+        return Self.response(for: request, body: Self.envelope("{\"version\":\"v0.1.150\"}"))
+      default:
+        return Self.unexpectedResponse(for: request)
+      }
+    }
+
+    let client = try Sub2APIClient(
+      serverAddress: "https://sub2api.example.com",
+      credentialStore: credentials,
+      session: makeStubSession()
+    )
+    let snapshot = try await client.connectAdminAPIKey("admin-test-key")
+
+    XCTAssertNil(snapshot.opsSnapshot)
+    XCTAssertEqual(snapshot.stats.todayRequests, 7)
+    XCTAssertEqual(
+      requests.paths,
+      [
+        "/api/v1/admin/dashboard/stats",
+        "/api/v1/admin/ops/dashboard/snapshot-v2",
+        "/api/v1/admin/accounts",
+        "/api/v1/settings/public",
+      ]
     )
   }
 
