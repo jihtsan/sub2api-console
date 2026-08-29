@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Sub2APIKit
 import SwiftUI
 
@@ -43,6 +44,7 @@ struct MenuBarView: View {
   @State private var adminListTab: AdminListTab = .accounts
   @State private var apiKeySortOption: AdminAPIKeySortOption = .todayRequests
   @State private var apiKeySortDescending = true
+  @StateObject private var menuWindowSizeCoordinator = MenuBarWindowSizeCoordinator()
 
   var body: some View {
     VStack(spacing: 0) {
@@ -81,7 +83,26 @@ struct MenuBarView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
     }
+    .fixedSize(horizontal: false, vertical: true)
     .frame(width: 390)
+    .background {
+      GeometryReader { proxy in
+        Color.clear.preference(
+          key: MenuBarContentSizePreferenceKey.self,
+          value: proxy.size
+        )
+      }
+    }
+    .overlay(alignment: .topLeading) {
+      MenuBarWindowSizeReader { window in
+        menuWindowSizeCoordinator.attach(to: window)
+      }
+      .frame(width: 1, height: 1)
+      .allowsHitTesting(false)
+    }
+    .onPreferenceChange(MenuBarContentSizePreferenceKey.self) { contentSize in
+      menuWindowSizeCoordinator.update(contentSize: contentSize)
+    }
     .onAppear { store.setMenuPresented(true) }
     .onDisappear { store.setMenuPresented(false) }
     .onChange(of: store.snapshot?.supportsAdminAccountList) { _, supportsAdminList in
@@ -679,6 +700,83 @@ struct MenuBarView: View {
     case .connected: store.isHealthy ? .green : .orange
     case .failed: .red
     }
+  }
+}
+
+private struct MenuBarContentSizePreferenceKey: PreferenceKey {
+  static let defaultValue: CGSize = .zero
+
+  static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+    value = nextValue()
+  }
+}
+
+private struct MenuBarWindowSizeReader: NSViewRepresentable {
+  let onWindowChange: (NSWindow?) -> Void
+
+  func makeNSView(context: Context) -> MenuBarWindowReaderView {
+    let view = MenuBarWindowReaderView()
+    view.onWindowChange = onWindowChange
+    return view
+  }
+
+  func updateNSView(_ nsView: MenuBarWindowReaderView, context: Context) {
+    nsView.onWindowChange = onWindowChange
+    onWindowChange(nsView.window)
+  }
+}
+
+private final class MenuBarWindowReaderView: NSView {
+  var onWindowChange: ((NSWindow?) -> Void)?
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    onWindowChange?(window)
+  }
+}
+
+@MainActor
+private final class MenuBarWindowSizeCoordinator: ObservableObject {
+  private weak var window: NSWindow?
+  private var measuredContentSize: CGSize = .zero
+  private var resizeScheduled = false
+
+  func attach(to window: NSWindow?) {
+    guard self.window !== window else { return }
+    self.window = window
+    scheduleResize()
+  }
+
+  func update(contentSize: CGSize) {
+    guard contentSize.width > 0, contentSize.height > 0 else { return }
+    measuredContentSize = contentSize
+    scheduleResize()
+  }
+
+  private func scheduleResize() {
+    guard !resizeScheduled else { return }
+    resizeScheduled = true
+
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.resizeScheduled = false
+      self.resizeWindowIfNeeded()
+    }
+  }
+
+  private func resizeWindowIfNeeded() {
+    guard let window, let contentView = window.contentView else { return }
+    guard measuredContentSize.width > 0, measuredContentSize.height > 0 else { return }
+    let currentContentSize = contentView.bounds.size
+    guard currentContentSize.width > 0, currentContentSize.height > 0 else { return }
+    guard abs(currentContentSize.height - measuredContentSize.height) > 0.5 else { return }
+
+    window.setContentSize(
+      NSSize(
+        width: currentContentSize.width,
+        height: measuredContentSize.height
+      )
+    )
   }
 }
 

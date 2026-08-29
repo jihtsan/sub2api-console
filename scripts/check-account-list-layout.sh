@@ -18,8 +18,14 @@ if ! matches 'private func adminAccountList\(' \
   || ! matches '\.frame\(height: accountListViewportHeight\(for: accounts\.count\)\)' \
   || ! matches 'VStack\(spacing: 0\)' \
   || ! matches 'switch adminListTab' \
-  || ! matches '\.id\(adminListTab\)'; then
-  print -u2 "Admin list layout regression: populated rows must use a non-zero viewport and keyed content when switching lists."
+  || ! matches '\.id\(adminListTab\)' \
+  || ! matches 'private final class MenuBarWindowSizeCoordinator' \
+  || ! matches 'private struct MenuBarWindowSizeReader' \
+  || ! matches 'private struct MenuBarContentSizePreferenceKey' \
+  || ! matches '\.onPreferenceChange\(MenuBarContentSizePreferenceKey' \
+  || ! matches '\.fixedSize\(horizontal: false, vertical: true\)' \
+  || ! matches '\.setContentSize\('; then
+  print -u2 "Admin list layout regression: the menu-bar window must resize when keyed list content changes."
   exit 1
 fi
 
