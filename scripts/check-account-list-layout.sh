@@ -15,19 +15,22 @@ matches() {
 }
 
 if ! matches 'private func adminAccountList\(' \
-  || ! matches '\.frame\(height: accountListViewportHeight\(for: accounts\.count\)\)' \
   || ! matches 'VStack\(spacing: 0\)' \
   || ! matches 'switch adminListTab' \
   || ! matches '\.id\(adminListTab\)' \
-  || ! matches 'private final class MenuBarWindowSizeCoordinator' \
-  || ! matches 'private struct MenuBarWindowSizeReader' \
-  || ! matches 'private struct MenuBarContentSizePreferenceKey' \
-  || ! matches '\.onPreferenceChange\(MenuBarContentSizePreferenceKey' \
-  || ! matches '\.fixedSize\(horizontal: false, vertical: true\)' \
-  || ! matches 'let anchoredTop = currentFrame\.maxY' \
-  || ! matches 'window\.frameRect\(forContentRect:' \
-  || ! matches 'window\.setFrame\(targetFrame, display: true, animate: false\)'; then
-  print -u2 "Admin list layout regression: the menu-bar window must resize while preserving its top edge."
+  || ! matches 'private enum MenuBarPanelLayout' \
+  || ! matches 'static let width: CGFloat = 390' \
+  || ! matches 'static let height: CGFloat = 690' \
+  || ! matches 'width: MenuBarPanelLayout\.width' \
+  || ! matches 'height: MenuBarPanelLayout\.height' \
+  || ! matches '\.frame\(maxHeight: \.infinity' \
+  || matches 'menuWindowSizeCoordinator' \
+  || matches 'private final class MenuBarWindowSizeCoordinator' \
+  || matches 'private struct MenuBarWindowSizeReader' \
+  || matches 'private struct MenuBarContentSizePreferenceKey' \
+  || matches 'window\.setContentSize\(' \
+  || matches 'window\.setFrame\('; then
+  print -u2 "Admin list layout regression: the menu-bar window must stay fixed while list content scrolls internally."
   exit 1
 fi
 
