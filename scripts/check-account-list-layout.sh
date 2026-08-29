@@ -24,8 +24,10 @@ if ! matches 'private func adminAccountList\(' \
   || ! matches 'private struct MenuBarContentSizePreferenceKey' \
   || ! matches '\.onPreferenceChange\(MenuBarContentSizePreferenceKey' \
   || ! matches '\.fixedSize\(horizontal: false, vertical: true\)' \
-  || ! matches '\.setContentSize\('; then
-  print -u2 "Admin list layout regression: the menu-bar window must resize when keyed list content changes."
+  || ! matches 'let anchoredTop = currentFrame\.maxY' \
+  || ! matches 'window\.frameRect\(forContentRect:' \
+  || ! matches 'window\.setFrame\(targetFrame, display: true, animate: false\)'; then
+  print -u2 "Admin list layout regression: the menu-bar window must resize while preserving its top edge."
   exit 1
 fi
 
