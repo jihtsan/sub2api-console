@@ -24,10 +24,13 @@ if ! matches 'private func adminAccountList\(' \
   || ! matches 'private struct MenuBarContentSizePreferenceKey' \
   || ! matches '\.onPreferenceChange\(MenuBarContentSizePreferenceKey' \
   || ! matches '\.fixedSize\(horizontal: false, vertical: true\)' \
-  || ! matches 'let anchoredTop = currentFrame\.maxY' \
-  || ! matches 'window\.frameRect\(forContentRect:' \
-  || ! matches 'window\.setFrame\(targetFrame, display: true, animate: false\)'; then
-  print -u2 "Admin list layout regression: the menu-bar window must resize while preserving its top edge."
+  || ! matches 'let anchoredTopLeft = NSPoint\(' \
+  || ! matches 'x: currentFrame\.minX' \
+  || ! matches 'y: currentFrame\.maxY' \
+  || ! matches 'window\.setContentSize\(' \
+  || ! matches 'window\.setFrameTopLeftPoint\(anchoredTopLeft\)' \
+  || matches 'window\.frameRect\(forContentRect:'; then
+  print -u2 "Admin list layout regression: the menu-bar window must fill its content and preserve its top-left anchor."
   exit 1
 fi
 
